@@ -1,0 +1,11 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Single-user personal tool, no auth — scoped to exactly this one
+    // document (a list of tickers, no sensitive data) rather than opening
+    // the whole database. Everything else stays default-denied.
+    match /watchlist/main {
+      allow read, write: if true;
+    }
+  }
+}

@@ -10,7 +10,9 @@
 <meta name="apple-mobile-web-app-capable" content="yes" />
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
 <meta name="apple-mobile-web-app-title" content="Screener" />
-<link rel="stylesheet" href="style.css?v=202608290004" />
+<link rel="stylesheet" href="style.css?v=202608290005" />
+<script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore-compat.js"></script>
 </head>
 <body>
 
@@ -23,6 +25,12 @@
     <input id="search-input" type="text" autocomplete="off" spellcheck="false"
       placeholder="Search ticker or company (e.g. AAPL, Microsoft)" />
     <div id="search-results" class="search-results hidden"></div>
+  </div>
+  <div class="watchlist-wrap">
+    <button id="watchlist-btn" class="watchlist-btn" title="Watchlist">
+      <span class="star-icon">★</span> <span id="watchlist-count">0</span>
+    </button>
+    <div id="watchlist-panel" class="watchlist-panel hidden"></div>
   </div>
   <div id="usage-pill" class="usage-pill" title="Financial Modeling Prep free tier resets daily">0 / 250 today</div>
 </header>
@@ -39,7 +47,7 @@
       <div class="hero-top">
         <div>
           <div class="hero-name" id="s-name">—</div>
-          <div class="hero-sub"><span id="s-symbol">—</span> · <span id="s-exchange">—</span> · <span id="s-sector">—</span></div>
+          <div class="hero-sub"><span id="s-symbol">—</span> · <span id="s-exchange">—</span> · <span id="s-sector">—</span> <button id="watch-toggle" class="watch-toggle" title="Add to watchlist">☆</button></div>
         </div>
         <div class="hero-price-block">
           <div class="hero-price" id="s-price">—</div>
@@ -93,7 +101,7 @@
   </div>
 </main>
 
-<script src="app.js?v=202608290010"></script>
+<script src="app.js?v=202608290011"></script>
 <script>if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js?v=202608291200');</script>
 </body>
 </html>

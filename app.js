@@ -9,6 +9,10 @@ const stockView = $("#stock-view");
 let searchDebounce = null;
 let activeSearchIndex = -1;
 let currentSearchItems = [];
+// Declared here (not down with the rest of the Financials-tab state) because
+// the Watchlist section below reads it immediately at script-load time, and
+// a `let` declared later in the file wouldn't exist yet at that point.
+let currentSymbol = null;
 
 async function api(path) {
   bumpUsage();
@@ -154,6 +158,122 @@ function selectTicker(symbol) {
   hideSearchResults();
   loadTicker(symbol);
 }
+
+// ---------- Watchlist (Firestore, synced across devices) ----------
+// No login on this app, so this is a single shared document rather than
+// per-user data — fine here since it's just a list of tickers, nothing
+// sensitive. Firestore config is not secret (same trust model as the KML
+// apps' Firebase config); security rules scope open access to exactly this
+// one document, not the whole database.
+
+const firebaseConfig = {
+  projectId: "stock-screener-kml",
+  appId: "1:960979198475:web:2fa2a90f6335eb55ca5d0e",
+  storageBucket: "stock-screener-kml.firebasestorage.app",
+  apiKey: "AIzaSyBtrxndTS1iJaXQAfJWYbpggOZNS2F4clE",
+  authDomain: "stock-screener-kml.firebaseapp.com",
+  messagingSenderId: "960979198475",
+};
+firebase.initializeApp(firebaseConfig);
+const db = firebase.firestore();
+const watchlistDoc = db.collection("watchlist").doc("main");
+
+const WATCHLIST_CACHE_KEY = "watchlist_cache_v1";
+let watchlist = [];
+
+function loadWatchlistCache() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(WATCHLIST_CACHE_KEY));
+    if (Array.isArray(raw)) watchlist = raw;
+  } catch {}
+}
+
+function saveWatchlistCache() {
+  try {
+    localStorage.setItem(WATCHLIST_CACHE_KEY, JSON.stringify(watchlist));
+  } catch {}
+}
+
+loadWatchlistCache();
+renderWatchlistUI();
+
+watchlistDoc.onSnapshot(
+  (snap) => {
+    const data = snap.data();
+    watchlist = data && Array.isArray(data.tickers) ? data.tickers : [];
+    saveWatchlistCache();
+    renderWatchlistUI();
+  },
+  (err) => console.error("Watchlist sync error:", err)
+);
+
+function isWatched(symbol) {
+  return watchlist.includes(symbol);
+}
+
+function toggleWatch(symbol) {
+  const next = isWatched(symbol) ? watchlist.filter((s) => s !== symbol) : [...watchlist, symbol];
+  // Optimistic local update — onSnapshot reconciles with the server shortly after.
+  watchlist = next;
+  saveWatchlistCache();
+  renderWatchlistUI();
+  watchlistDoc
+    .set({ tickers: next, updatedAt: firebase.firestore.FieldValue.serverTimestamp() }, { merge: true })
+    .catch((err) => console.error("Watchlist write failed:", err));
+}
+
+function renderWatchlistUI() {
+  $("#watchlist-count").textContent = watchlist.length;
+  const panel = $("#watchlist-panel");
+  if (!watchlist.length) {
+    panel.innerHTML = `<div class="search-empty">No saved tickers yet — click the star next to any ticker to add it.</div>`;
+  } else {
+    panel.innerHTML = watchlist
+      .map(
+        (sym) => `
+        <div class="search-row" data-symbol="${sym}">
+          <span class="search-row-symbol">${sym}</span>
+          <button class="watchlist-remove" data-symbol="${sym}" title="Remove">×</button>
+        </div>`
+      )
+      .join("");
+    panel.querySelectorAll(".search-row").forEach((row) => {
+      row.addEventListener("click", (e) => {
+        if (e.target.closest(".watchlist-remove")) return;
+        selectTicker(row.dataset.symbol);
+        panel.classList.add("hidden");
+      });
+    });
+    panel.querySelectorAll(".watchlist-remove").forEach((btn) => {
+      btn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        toggleWatch(btn.dataset.symbol);
+      });
+    });
+  }
+  if (currentSymbol) updateWatchToggleButton(currentSymbol);
+}
+
+function updateWatchToggleButton(symbol) {
+  const btn = $("#watch-toggle");
+  const watched = isWatched(symbol);
+  btn.textContent = watched ? "★" : "☆";
+  btn.classList.toggle("watched", watched);
+  btn.title = watched ? "Remove from watchlist" : "Add to watchlist";
+}
+
+$("#watch-toggle").addEventListener("click", () => {
+  if (currentSymbol) toggleWatch(currentSymbol);
+});
+
+$("#watchlist-btn").addEventListener("click", (e) => {
+  e.stopPropagation();
+  $("#watchlist-panel").classList.toggle("hidden");
+});
+
+document.addEventListener("click", (e) => {
+  if (!e.target.closest(".watchlist-wrap")) $("#watchlist-panel").classList.add("hidden");
+});
 
 // ---------- Loading a ticker ----------
 
@@ -662,7 +782,6 @@ const FIN_STATEMENT_ROWS = {
 const SEC_STATEMENT_KEY = { balance: "balanceSheet", income: "incomeStatement", cashflow: "cashFlow" };
 
 let finCache = {};
-let currentSymbol = null;
 let activeFinTab = "balance";
 let currentSecPromise = null;
 let currentFhMetricsPromise = null;
