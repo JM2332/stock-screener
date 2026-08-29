@@ -3,7 +3,7 @@ const API_BASE = "https://us-central1-stock-screener-kml.cloudfunctions.net/api"
 const $ = (sel) => document.querySelector(sel);
 const searchInput = $("#search-input");
 const searchResults = $("#search-results");
-const emptyState = $("#empty-state");
+const homeView = $("#home-view");
 const stockView = $("#stock-view");
 
 let searchDebounce = null;
@@ -13,6 +13,7 @@ let currentSearchItems = [];
 // the Watchlist section below reads it immediately at script-load time, and
 // a `let` declared later in the file wouldn't exist yet at that point.
 let currentSymbol = null;
+let currentView = "home"; // "home" | "stock" | "compare"
 
 async function api(path) {
   bumpUsage();
@@ -233,6 +234,7 @@ function renderWatchlistUI() {
         (sym) => `
         <div class="search-row" data-symbol="${sym}">
           <span class="search-row-symbol">${sym}</span>
+          <span class="watchlist-row-price" data-price-for="${sym}">…</span>
           <button class="watchlist-remove" data-symbol="${sym}" title="Remove">×</button>
         </div>`
       )
@@ -250,8 +252,27 @@ function renderWatchlistUI() {
         toggleWatch(btn.dataset.symbol);
       });
     });
+    enrichWatchlistPrices(watchlist);
   }
   if (currentSymbol) updateWatchToggleButton(currentSymbol);
+  if (currentView === "home") loadHomeContent();
+}
+
+// Finnhub is uncapped, so it's cheap to fetch a live quote per watchlisted
+// ticker every time the panel re-renders — used by both the topbar dropdown
+// and the home page's tiles.
+async function enrichWatchlistPrices(symbols) {
+  const results = await Promise.all(
+    symbols.map((sym) => freeApi(`fh-quote/${sym}`).then((q) => ({ sym, q })).catch(() => ({ sym, q: null })))
+  );
+  if (watchlist.join(",") !== symbols.join(",")) return; // stale — watchlist changed mid-fetch
+  results.forEach(({ sym, q }) => {
+    const el = document.querySelector(`.watchlist-row-price[data-price-for="${sym}"]`);
+    if (!el || !q || q.c === undefined) return;
+    const up = q.d >= 0;
+    el.textContent = `$${fmtNum(q.c, { maximumFractionDigits: 2 })} ${up ? "+" : ""}${fmtNum(q.dp, { maximumFractionDigits: 1 })}%`;
+    el.classList.add(up ? "up" : "down");
+  });
 }
 
 function updateWatchToggleButton(symbol) {
@@ -275,6 +296,155 @@ document.addEventListener("click", (e) => {
   if (!e.target.closest(".watchlist-wrap")) $("#watchlist-panel").classList.add("hidden");
 });
 
+// ---------- Home page ----------
+// The default landing view — watchlist snapshot tiles plus a merged, sorted
+// news feed across every watchlisted ticker. Loads on first page load and
+// whenever the watchlist changes while this view is showing.
+
+$("#home-btn").addEventListener("click", showHome);
+
+function showHome() {
+  exitCompareMode();
+  currentSymbol = null;
+  stockView.classList.add("hidden");
+  homeView.classList.remove("hidden");
+  currentView = "home";
+  loadHomeContent();
+}
+
+async function loadHomeContent() {
+  const symbols = watchlist.slice();
+  const tilesEl = $("#home-tiles");
+  const newsEl = $("#home-news");
+  if (!symbols.length) {
+    tilesEl.innerHTML = `<div class="muted-note">Search a ticker and click the star to add it to your watchlist — it'll show up here.</div>`;
+    newsEl.innerHTML = "";
+    return;
+  }
+  tilesEl.innerHTML = `<div class="spinner-line">Loading…</div>`;
+  newsEl.innerHTML = `<div class="spinner-line">Loading…</div>`;
+
+  const results = await Promise.all(
+    symbols.map(async (sym) => {
+      const [quoteRes, profileRes, newsRes] = await Promise.allSettled([
+        freeApi(`fh-quote/${sym}`),
+        freeApi(`fh-profile/${sym}`),
+        freeApi(`news/${sym}`),
+      ]);
+      return {
+        symbol: sym,
+        quote: quoteRes.status === "fulfilled" ? quoteRes.value : null,
+        profile: profileRes.status === "fulfilled" ? profileRes.value : null,
+        news: newsRes.status === "fulfilled" && Array.isArray(newsRes.value) ? newsRes.value : [],
+      };
+    })
+  );
+
+  if (watchlist.join(",") !== symbols.join(",")) return; // stale — watchlist changed mid-fetch
+
+  tilesEl.innerHTML = results
+    .map((r) => {
+      const q = r.quote;
+      if (!q || q.c === undefined) {
+        return `<div class="home-tile" data-symbol="${r.symbol}"><div class="home-tile-symbol">${r.symbol}</div><div class="muted-note">Unavailable</div></div>`;
+      }
+      const up = q.d >= 0;
+      return `<div class="home-tile" data-symbol="${r.symbol}">
+        <div class="home-tile-symbol">${r.symbol}</div>
+        <div class="home-tile-name">${(r.profile && r.profile.name) || ""}</div>
+        <div class="home-tile-price">$${fmtNum(q.c, { maximumFractionDigits: 2 })}</div>
+        <div class="home-tile-change ${up ? "up" : "down"}">${up ? "+" : ""}${fmtNum(q.d, { maximumFractionDigits: 2 })} (${up ? "+" : ""}${fmtNum(q.dp, { maximumFractionDigits: 2 })}%)</div>
+      </div>`;
+    })
+    .join("");
+  tilesEl.querySelectorAll(".home-tile").forEach((tile) => {
+    tile.addEventListener("click", () => selectTicker(tile.dataset.symbol));
+  });
+
+  const allNews = results
+    .flatMap((r) => r.news.map((n) => ({ ...n, _symbol: r.symbol })))
+    .sort((a, b) => (b.datetime || 0) - (a.datetime || 0))
+    .slice(0, 15);
+
+  if (!allNews.length) {
+    newsEl.innerHTML = `<div class="muted-note">No recent news found for your watchlist.</div>`;
+    return;
+  }
+  newsEl.innerHTML = allNews
+    .map((it) => {
+      const date = it.datetime ? new Date(it.datetime * 1000).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" }) : "";
+      return `
+      <a class="news-item" href="${it.url}" target="_blank" rel="noopener noreferrer">
+        ${it.image ? `<img class="news-thumb" src="${it.image}" loading="lazy" onerror="this.remove()" />` : ""}
+        <div>
+          <div class="news-title">[${it._symbol}] ${it.headline || ""}</div>
+          <div class="news-meta">${it.source || ""} · ${date}</div>
+        </div>
+      </a>`;
+    })
+    .join("");
+}
+
+// ---------- Price alerts ----------
+// Threshold storage only for now — actual notification delivery needs a
+// scheduled Cloud Function plus an email service (EmailJS, same pattern as
+// staff-rota's publish notifications), held off until that's set up since
+// connecting an email service is a step only the user can do. The threshold
+// itself already persists and syncs across devices via Firestore, same
+// pattern as the watchlist.
+
+const alertsDoc = db.collection("alerts").doc("main");
+let alerts = {};
+
+alertsDoc.onSnapshot(
+  (snap) => {
+    alerts = snap.data() || {};
+    if (currentSymbol) showAlertFormState(currentSymbol);
+  },
+  (err) => console.error("Alerts sync error:", err)
+);
+
+$("#alert-toggle").addEventListener("click", () => {
+  $("#alert-form").classList.toggle("hidden");
+});
+
+$("#alert-save").addEventListener("click", () => {
+  if (!currentSymbol) return;
+  const direction = $("#alert-direction").value;
+  const price = parseFloat($("#alert-price").value);
+  if (!(price > 0)) return;
+  // merge:true replaces just this one key server-side, so two devices
+  // setting alerts on different tickers around the same time can't clobber
+  // each other the way a full-document overwrite would.
+  alertsDoc.set({ [currentSymbol]: { direction, price } }, { merge: true }).catch((err) => console.error("Alert save failed:", err));
+  alerts = { ...alerts, [currentSymbol]: { direction, price } };
+  showAlertFormState(currentSymbol);
+  $("#alert-form").classList.add("hidden");
+});
+
+$("#alert-remove").addEventListener("click", () => {
+  if (!currentSymbol) return;
+  alertsDoc.set({ [currentSymbol]: firebase.firestore.FieldValue.delete() }, { merge: true }).catch((err) => console.error("Alert remove failed:", err));
+  delete alerts[currentSymbol];
+  showAlertFormState(currentSymbol);
+});
+
+function showAlertFormState(symbol) {
+  const existing = alerts[symbol];
+  $("#alert-toggle").classList.toggle("alert-active", !!existing);
+  $("#alert-remove").classList.toggle("hidden", !existing);
+  const currentLabel = $("#alert-current");
+  if (existing) {
+    currentLabel.textContent = `Current: alert when ${existing.direction} $${existing.price}`;
+    $("#alert-direction").value = existing.direction;
+    $("#alert-price").value = existing.price;
+  } else {
+    currentLabel.textContent = "";
+    $("#alert-direction").value = "above";
+    $("#alert-price").value = "";
+  }
+}
+
 // ---------- Compare tickers ----------
 // Third of four build-out items. Fetches quote/profile/metrics (Finnhub,
 // uncapped) plus a 1Y price history (FMP, quota-counted — same per-ticker
@@ -291,22 +461,27 @@ let compareSearchDebounce = null;
 $("#compare-toggle").addEventListener("click", () => {
   if (compareMode) {
     exitCompareMode();
+    if (!currentSymbol) showHome();
   } else {
     stockView.classList.add("hidden");
-    emptyState.classList.add("hidden");
+    homeView.classList.add("hidden");
     hideSearchResults();
     compareMode = true;
+    currentView = "compare";
     $("#compare-toggle").classList.add("active");
     compareView.classList.remove("hidden");
   }
 });
 
+// Pure "turn off compare mode" utility — deliberately no navigation side
+// effect (doesn't decide what to show instead), since its two callers want
+// different results: loadTicker immediately shows the stock view itself
+// right after, while the compare-toggle button explicitly navigates home.
 function exitCompareMode() {
   if (!compareMode) return;
   compareMode = false;
   $("#compare-toggle").classList.remove("active");
   compareView.classList.add("hidden");
-  if (!currentSymbol) emptyState.classList.remove("hidden");
 }
 
 compareInput.addEventListener("input", () => {
@@ -387,89 +562,67 @@ function renderCompareChips() {
 async function loadCompareData() {
   const tickers = compareTickers.slice();
   if (!tickers.length) {
-    $("#compare-chart-body").innerHTML = `<div class="muted-note">Add 2-4 tickers above to compare.</div>`;
-    $("#compare-table-body").innerHTML = "";
+    $("#tv-compare-chart-container").innerHTML = "";
+    $("#compare-table-body").innerHTML = `<div class="muted-note">Add 2-4 tickers above to compare.</div>`;
+    lastCompareFinResults = [];
+    renderCompareFinancials();
     return;
   }
-  $("#compare-chart-body").innerHTML = `<div class="spinner-line">Loading…</div>`;
   $("#compare-table-body").innerHTML = `<div class="spinner-line">Loading…</div>`;
 
   const results = await Promise.all(
     tickers.map(async (symbol) => {
-      const [quoteRes, profileRes, metricsRes, historyRes] = await Promise.allSettled([
+      const [quoteRes, profileRes, metricsRes] = await Promise.allSettled([
         freeApi(`fh-quote/${symbol}`),
         freeApi(`fh-profile/${symbol}`),
         freeApi(`fh-metrics/${symbol}`),
-        api(`history/${symbol}?range=1y`),
       ]);
       return {
         symbol,
         quote: quoteRes.status === "fulfilled" ? quoteRes.value : null,
         profile: profileRes.status === "fulfilled" ? profileRes.value : null,
         metrics: metricsRes.status === "fulfilled" ? metricsRes.value : null,
-        history: historyRes.status === "fulfilled" ? historyRes.value : null,
-        historyError: historyRes.status === "rejected" ? historyRes.reason : null,
       };
     })
   );
 
   if (compareTickers.join(",") !== tickers.join(",")) return; // stale — selection changed mid-fetch
 
-  renderCompareChart(results);
+  loadCompareTradingViewChart(results);
   renderCompareTable(results);
+  loadCompareFinancials(tickers);
 }
 
-function renderCompareChart(results) {
-  const withHistory = results.filter((r) => Array.isArray(r.history) && r.history.length > 1);
-  if (!withHistory.length) {
-    const rateLimited = results.some((r) => r.historyError && r.historyError.status === 429);
-    $("#compare-chart-body").innerHTML = `<div class="muted-note">${rateLimited ? fmpFailureNote("rate-limited") : "Not enough price history available for these tickers yet."}</div>`;
-    return;
+// TradingView's own multi-symbol comparison (compareSymbols, "SameScale")
+// replaces the hand-rolled normalized overlay — same zero-quota, zero-
+// maintenance win as the single-ticker chart.
+function loadCompareTradingViewChart(results) {
+  const container = $("#tv-compare-chart-container");
+  container.innerHTML = "";
+  if (!results.length) return;
+  const toTV = (r) => {
+    const prefix = tvExchangePrefix(r.profile && r.profile.exchange);
+    return prefix ? `${prefix}:${r.symbol}` : r.symbol;
+  };
+  const [first, ...rest] = results;
+  try {
+    new TradingView.widget({
+      autosize: true,
+      symbol: toTV(first),
+      compareSymbols: rest.map((r) => ({ symbol: toTV(r), position: "SameScale" })),
+      interval: "D",
+      timezone: "Etc/UTC",
+      theme: "dark",
+      style: "1",
+      locale: "en",
+      toolbar_bg: "#151925",
+      enable_publishing: false,
+      allow_symbol_change: false,
+      container_id: "tv-compare-chart-container",
+    });
+  } catch {
+    container.innerHTML = `<div class="muted-note">Couldn't load comparison chart.</div>`;
   }
-
-  const W = 700, H = 220, padX = 4, padY = 12;
-  const series = withHistory.map((r) => {
-    const points = r.history.slice().sort((a, b) => (a.date < b.date ? -1 : 1));
-    const base = points[0].price;
-    return {
-      symbol: r.symbol,
-      color: COMPARE_COLORS[results.indexOf(r)] || "var(--text-faint)",
-      pct: points.map((p) => ((p.price - base) / base) * 100),
-    };
-  });
-
-  const allPct = series.flatMap((s) => s.pct);
-  const min = Math.min(...allPct, 0);
-  const max = Math.max(...allPct, 0);
-  const spanRange = max - min || 1;
-
-  const paths = series
-    .map((s) => {
-      const stepX = s.pct.length > 1 ? (W - padX * 2) / (s.pct.length - 1) : 0;
-      const d = s.pct
-        .map((v, i) => {
-          const x = padX + i * stepX;
-          const y = padY + (H - padY * 2) * (1 - (v - min) / spanRange);
-          return `${i === 0 ? "M" : "L"}${x.toFixed(2)},${y.toFixed(2)}`;
-        })
-        .join(" ");
-      return `<path d="${d}" style="fill:none;stroke:${s.color};stroke-width:2"></path>`;
-    })
-    .join("");
-
-  const zeroY = padY + (H - padY * 2) * (1 - (0 - min) / spanRange);
-  const zeroLine = `<line x1="${padX}" y1="${zeroY.toFixed(2)}" x2="${W - padX}" y2="${zeroY.toFixed(2)}" style="stroke:var(--card-border);stroke-width:1;stroke-dasharray:4 4"></line>`;
-
-  const legend = series
-    .map((s) => {
-      const lastPct = s.pct[s.pct.length - 1];
-      return `<div class="compare-legend-item"><span class="chip-dot" style="background:${s.color}"></span>${s.symbol} ${lastPct >= 0 ? "+" : ""}${lastPct.toFixed(1)}%</div>`;
-    })
-    .join("");
-
-  $("#compare-chart-body").innerHTML = `
-    <svg viewBox="0 0 ${W} ${H}" class="price-chart" preserveAspectRatio="none">${zeroLine}${paths}</svg>
-    <div class="compare-legend">${legend}</div>`;
 }
 
 function metricVal(r, key) {
@@ -500,24 +653,91 @@ function renderCompareTable(results) {
   $("#compare-table-body").innerHTML = `<div class="compare-table-wrap"><table class="compare-table"><thead>${header}</thead><tbody>${body}</tbody></table></div>`;
 }
 
+// Financial trends across compared tickers, from SEC EDGAR (free, uncapped
+// — see sec-financials in the Cloud Function). Revenue/Net Income/Gross
+// Margin by fiscal year, one row per ticker.
+
+let lastCompareFinResults = [];
+let activeCompareMetric = "revenue";
+
+$("#compare-fin-tabs").addEventListener("click", (e) => {
+  const btn = e.target.closest(".tab-btn");
+  if (!btn) return;
+  activeCompareMetric = btn.dataset.metric;
+  [...$("#compare-fin-tabs").children].forEach((b) => b.classList.toggle("active", b === btn));
+  renderCompareFinancials();
+});
+
+async function loadCompareFinancials(tickers) {
+  $("#compare-financials-body").innerHTML = `<div class="spinner-line">Loading…</div>`;
+  const results = await Promise.all(
+    tickers.map(async (symbol) => {
+      try {
+        const data = await freeApi(`sec-financials/${symbol}`);
+        return { symbol, income: (data && data.incomeStatement) || [] };
+      } catch {
+        return { symbol, income: [] };
+      }
+    })
+  );
+  if (compareTickers.join(",") !== tickers.join(",")) return; // stale
+  lastCompareFinResults = results;
+  renderCompareFinancials();
+}
+
+function renderCompareFinancials() {
+  const el = $("#compare-financials-body");
+  const results = lastCompareFinResults;
+  if (!results.length) {
+    el.innerHTML = `<div class="muted-note">Add tickers above to compare.</div>`;
+    return;
+  }
+  const years = [...new Set(results.flatMap((r) => r.income.map((p) => p.fiscalYear)))].sort((a, b) => b - a).slice(0, 5);
+  if (!years.length) {
+    el.innerHTML = `<div class="muted-note">No SEC filing data available for these tickers.</div>`;
+    return;
+  }
+  const getVal = (row) => {
+    if (!row) return null;
+    if (activeCompareMetric === "grossMargin") {
+      return row.revenue && row.grossProfit != null ? (row.grossProfit / row.revenue) * 100 : null;
+    }
+    return row[activeCompareMetric];
+  };
+  const header = `<tr><th>Ticker</th>${years.map((y) => `<th>${y}</th>`).join("")}</tr>`;
+  const body = results
+    .map((r) => {
+      const cells = years
+        .map((y) => {
+          const row = r.income.find((p) => p.fiscalYear === y);
+          const v = getVal(row);
+          if (v === null || v === undefined) return "<td>—</td>";
+          return activeCompareMetric === "grossMargin" ? `<td>${v.toFixed(2)}%</td>` : `<td>${fmtBig(v)}</td>`;
+        })
+        .join("");
+      return `<tr><td>${r.symbol}</td>${cells}</tr>`;
+    })
+    .join("");
+  el.innerHTML = `<div class="compare-table-wrap"><table class="compare-table"><thead>${header}</thead><tbody>${body}</tbody></table></div>`;
+}
+
 // ---------- Loading a ticker ----------
 
 function loadTicker(symbol) {
   exitCompareMode(); // selecting a single ticker implies leaving compare view
-  emptyState.classList.add("hidden");
+  homeView.classList.add("hidden");
   stockView.classList.remove("hidden");
+  currentView = "stock";
   setLoadingStates();
 
   // Reset per-ticker financials state synchronously, before any async loader
   // below gets a chance to run — otherwise a Financials tab click landing
   // mid-load could read or write into the previous ticker's cache.
   currentSymbol = symbol;
+  updateWatchToggleButton(symbol); // reflect the new ticker's watched state immediately, not on the next watchlist change
   finCache = {};
   activeFinTab = "balance";
   [...$("#fin-tabs").children].forEach((b) => b.classList.toggle("active", b.dataset.tab === "balance"));
-  chartCache = {};
-  activeRange = "1y";
-  [...$("#range-tabs").children].forEach((b) => b.classList.toggle("active", b.dataset.range === "1y"));
 
   // Finnhub + SEC EDGAR "core" data — quote/profile/basic ratios/
   // recommendation trends/financial statements — works for effectively any
@@ -537,11 +757,12 @@ function loadTicker(symbol) {
   const priceTargetPromise = api(`price-target/${symbol}`);
 
   loadHero(symbol, fhQuotePromise, fhProfilePromise, fhMetricsPromise, fmpQuotePromise);
-  loadChart(symbol);
   loadFairValue(symbol, fhQuotePromise, fhMetricsPromise, fmpQuotePromise, fmpProfilePromise, priceTargetPromise);
   loadRatings(symbol, fhRecPromise, priceTargetPromise);
   loadFinancials(symbol, secPromise, fhMetricsPromise);
+  loadEarningsCalendar(symbol);
   loadNews(symbol);
+  showAlertFormState(symbol);
 }
 
 function setLoadingStates() {
@@ -553,13 +774,15 @@ function setLoadingStates() {
   $("#s-change").textContent = "";
   $("#s-change").className = "hero-change";
   $("#s-stats").innerHTML = "";
-  $("#chart-body").innerHTML = `<div class="spinner-line">Loading…</div>`;
+  $("#tv-chart-container").innerHTML = "";
   $("#fv-body").innerHTML = `<div class="spinner-line">Loading…</div>`;
   $("#ratings-body").innerHTML = `<div class="spinner-line">Loading…</div>`;
   $("#fin-body").innerHTML = `<div class="spinner-line">Loading…</div>`;
+  $("#calendar-body").innerHTML = `<div class="spinner-line">Loading…</div>`;
   $("#news-body").innerHTML = `<div class="spinner-line">Loading…</div>`;
   showTranscriptLoadButton();
   $("#research-links-body").innerHTML = "";
+  $("#alert-form").classList.add("hidden");
 }
 
 function fmtNum(n, opts = {}) {
@@ -608,6 +831,7 @@ async function loadHero(symbol, fhQuotePromise, fhProfilePromise, fhMetricsPromi
     $("#s-name").textContent = (profile && profile.name) || symbol;
     $("#s-symbol").textContent = symbol;
     loadResearchLinks(symbol, profile && profile.name);
+    loadTradingViewChart(symbol, profile && profile.exchange);
     $("#s-exchange").textContent = normalizeExchange(profile && profile.exchange);
     $("#s-sector").textContent = (profile && profile.finnhubIndustry) || "—";
     $("#s-price").textContent = "$" + fmtNum(quote.c, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -651,91 +875,40 @@ async function loadHero(symbol, fhQuotePromise, fhProfilePromise, fhMetricsPromi
   }
 }
 
-// ---------- Price chart ----------
-// Finnhub's candle endpoint is paid-only on the free tier, so this stays on
-// FMP (counted against the 250/day quota — roughly 1 call per range viewed,
-// cached per range so switching back to an already-viewed range is free).
+// ---------- Price chart (TradingView widget) ----------
+// Replaced the hand-rolled FMP-backed chart with TradingView's free,
+// official embeddable widget — no API key, no quota impact at all (it's an
+// iframe pulling straight from TradingView's own servers), and it comes
+// with volume, multiple timeframes, and technical indicators (moving
+// averages, RSI, MACD, etc.) built into its own UI for free, which would
+// otherwise have been real work to hand-build.
 
-let currentChartSymbol = null;
-let activeRange = "1y";
-let chartCache = {};
-
-$("#range-tabs").addEventListener("click", (e) => {
-  const btn = e.target.closest(".tab-btn");
-  if (!btn) return;
-  activeRange = btn.dataset.range;
-  [...$("#range-tabs").children].forEach((b) => b.classList.toggle("active", b === btn));
-  renderChart();
-});
-
-async function loadChart(symbol) {
-  currentChartSymbol = symbol;
-  await fetchChartRange(activeRange);
-  renderChart();
+function tvExchangePrefix(exchange) {
+  const norm = normalizeExchange(exchange);
+  return norm === "NASDAQ" || norm === "NYSE" ? norm : null;
 }
 
-function fetchChartRange(range) {
-  if (!chartCache[range]) {
-    chartCache[range] = api(`history/${currentChartSymbol}?range=${range}`)
-      .then((data) => ({ data, error: null }))
-      .catch((err) => ({ data: null, error: err }));
+function loadTradingViewChart(symbol, exchange) {
+  const container = $("#tv-chart-container");
+  container.innerHTML = "";
+  const prefix = tvExchangePrefix(exchange);
+  try {
+    new TradingView.widget({
+      autosize: true,
+      symbol: prefix ? `${prefix}:${symbol}` : symbol,
+      interval: "D",
+      timezone: "Etc/UTC",
+      theme: "dark",
+      style: "1",
+      locale: "en",
+      toolbar_bg: "#151925",
+      enable_publishing: false,
+      allow_symbol_change: false,
+      container_id: "tv-chart-container",
+    });
+  } catch {
+    container.innerHTML = `<div class="muted-note">Couldn't load chart.</div>`;
   }
-  return chartCache[range];
-}
-
-async function renderChart() {
-  const el = $("#chart-body");
-  const symbol = currentChartSymbol;
-  const range = activeRange;
-  el.innerHTML = `<div class="spinner-line">Loading…</div>`;
-  const result = await fetchChartRange(range);
-  if (symbol !== currentChartSymbol || range !== activeRange) return; // stale, ticker/range changed since
-
-  if (result.error || !Array.isArray(result.data) || result.data.length < 2) {
-    let msg = "Not enough price history available for this ticker.";
-    if (result.error && result.error.status === 429) msg = fmpFailureNote("rate-limited");
-    else if (result.error && (result.error.status === 402 || result.error.status === 403)) {
-      msg = "Price history isn't available for this ticker on the free FMP plan.";
-    }
-    el.innerHTML = `<div class="muted-note">${msg}</div>`;
-    return;
-  }
-
-  el.innerHTML = buildChartSvg(result.data);
-}
-
-function buildChartSvg(data) {
-  const points = data.slice().sort((a, b) => (a.date < b.date ? -1 : 1));
-  const prices = points.map((p) => p.price);
-  const min = Math.min(...prices);
-  const max = Math.max(...prices);
-  const first = prices[0];
-  const last = prices[prices.length - 1];
-  const changePct = ((last - first) / first) * 100;
-  const up = changePct >= 0;
-  const colorVar = up ? "var(--green)" : "var(--red)";
-
-  const W = 700, H = 200, padX = 4, padY = 10;
-  const spanRange = max - min || 1;
-  const stepX = points.length > 1 ? (W - padX * 2) / (points.length - 1) : 0;
-  const coords = prices.map((p, i) => {
-    const x = padX + i * stepX;
-    const y = padY + (H - padY * 2) * (1 - (p - min) / spanRange);
-    return [x, y];
-  });
-  const linePath = coords.map(([x, y], i) => `${i === 0 ? "M" : "L"}${x.toFixed(2)},${y.toFixed(2)}`).join(" ");
-  const areaPath = `${linePath} L${coords[coords.length - 1][0].toFixed(2)},${H - padY} L${coords[0][0].toFixed(2)},${H - padY} Z`;
-
-  return `
-    <div class="chart-summary">
-      <span class="chart-price">$${fmtNum(last, { maximumFractionDigits: 2 })}</span>
-      <span class="chart-change ${up ? "up" : "down"}">${up ? "+" : ""}${changePct.toFixed(2)}% over period</span>
-    </div>
-    <svg viewBox="0 0 ${W} ${H}" class="price-chart" preserveAspectRatio="none">
-      <path d="${areaPath}" style="fill:${colorVar};opacity:0.1;stroke:none"></path>
-      <path d="${linePath}" style="fill:none;stroke:${colorVar};stroke-width:2"></path>
-    </svg>
-    <div class="chart-dates"><span>${points[0].date}</span><span>${points[points.length - 1].date}</span></div>`;
 }
 
 // ---------- Fair value (multiple independent methods) ----------
@@ -1148,6 +1321,34 @@ async function loadNews(symbol) {
     el.innerHTML = err.status === 402 || err.status === 403
       ? `<div class="muted-note">News requires a paid Finnhub plan.</div>`
       : `<div class="error-note">Couldn't load news.</div>`;
+  }
+}
+
+// ---------- Earnings calendar ----------
+// Free, uncapped on Finnhub.
+
+async function loadEarningsCalendar(symbol) {
+  const el = $("#calendar-body");
+  try {
+    const data = await freeApi(`fh-earnings-calendar/${symbol}`);
+    const items = (data && data.earningsCalendar) || [];
+    if (symbol !== currentSymbol) return;
+    if (!items.length) {
+      el.innerHTML = `<div class="muted-note">No upcoming earnings date found.</div>`;
+      return;
+    }
+    const next = items[0];
+    const epsEst = next.epsEstimate ? "$" + fmtNum(next.epsEstimate, { maximumFractionDigits: 2 }) : "—";
+    const revEst = next.revenueEstimate ? fmtBig(next.revenueEstimate) : "—";
+    const when = next.hour === "bmo" ? "Before market open" : next.hour === "amc" ? "After market close" : "—";
+    el.innerHTML = `
+      <div class="rating-row"><span class="rating-label">Next Earnings Date</span><span class="rating-value">${next.date || "—"}</span></div>
+      <div class="rating-row"><span class="rating-label">Timing</span><span class="rating-value">${when}</span></div>
+      <div class="rating-row"><span class="rating-label">EPS Estimate</span><span class="rating-value">${epsEst}</span></div>
+      <div class="rating-row"><span class="rating-label">Revenue Estimate</span><span class="rating-value">${revEst}</span></div>`;
+  } catch {
+    if (symbol !== currentSymbol) return;
+    el.innerHTML = `<div class="error-note">Couldn't load earnings calendar.</div>`;
   }
 }
 

@@ -10,14 +10,14 @@
 <meta name="apple-mobile-web-app-capable" content="yes" />
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
 <meta name="apple-mobile-web-app-title" content="Screener" />
-<link rel="stylesheet" href="style.css?v=202608290007" />
+<link rel="stylesheet" href="style.css?v=202608290008" />
 <script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore-compat.js"></script>
 </head>
 <body>
 
 <header class="topbar">
-  <div class="brand">
+  <div class="brand" id="home-btn" title="Home" role="button">
     <span class="brand-mark">S</span>
     <span class="brand-name">Screener</span>
   </div>
@@ -37,9 +37,19 @@
 </header>
 
 <main id="app">
-  <div id="empty-state" class="empty-state">
-    <div class="empty-icon">◎</div>
-    <p>Search a ticker to pull up a full picture — quote, fair value, ratings, financials and news.</p>
+
+  <div id="home-view" class="home-view">
+    <div class="card-header-row">
+      <h2>Your Watchlist</h2>
+    </div>
+    <div id="home-tiles" class="home-tiles">
+      <div class="muted-note">Search a ticker and click the star to add it to your watchlist — it'll show up here.</div>
+    </div>
+
+    <div class="card-header-row">
+      <h2>News for Your Watchlist</h2>
+    </div>
+    <div id="home-news" class="news-body"></div>
   </div>
 
   <div id="stock-view" class="stock-view hidden">
@@ -48,7 +58,21 @@
       <div class="hero-top">
         <div>
           <div class="hero-name" id="s-name">—</div>
-          <div class="hero-sub"><span id="s-symbol">—</span> · <span id="s-exchange">—</span> · <span id="s-sector">—</span> <button id="watch-toggle" class="watch-toggle" title="Add to watchlist">☆</button></div>
+          <div class="hero-sub">
+            <span id="s-symbol">—</span> · <span id="s-exchange">—</span> · <span id="s-sector">—</span>
+            <button id="watch-toggle" class="watch-toggle" title="Add to watchlist">☆</button>
+            <button id="alert-toggle" class="watch-toggle" title="Set a price alert">🔔</button>
+          </div>
+          <div id="alert-form" class="alert-form hidden">
+            <select id="alert-direction">
+              <option value="above">Alert when price rises above</option>
+              <option value="below">Alert when price falls below</option>
+            </select>
+            <input id="alert-price" type="number" step="0.01" placeholder="Price" />
+            <button id="alert-save" class="tab-btn">Save</button>
+            <button id="alert-remove" class="transcript-back hidden">Remove alert</button>
+            <span id="alert-current" class="muted-note"></span>
+          </div>
         </div>
         <div class="hero-price-block">
           <div class="hero-price" id="s-price">—</div>
@@ -59,16 +83,8 @@
     </section>
 
     <section class="card" id="chart-card">
-      <div class="chart-header">
-        <h2>Price History</h2>
-        <div class="tabs" id="range-tabs">
-          <button class="tab-btn" data-range="1m">1M</button>
-          <button class="tab-btn" data-range="6m">6M</button>
-          <button class="tab-btn active" data-range="1y">1Y</button>
-          <button class="tab-btn" data-range="5y">5Y</button>
-        </div>
-      </div>
-      <div id="chart-body" class="chart-body">Loading…</div>
+      <h2>Price Chart</h2>
+      <div class="tv-chart-wrap"><div id="tv-chart-container"></div></div>
     </section>
 
     <section class="card fair-value-card" id="fv-card">
@@ -93,6 +109,11 @@
         <div id="fin-body" class="card-body">Loading…</div>
       </section>
     </div>
+
+    <section class="card" id="calendar-card">
+      <h2>Earnings Calendar</h2>
+      <div id="calendar-body" class="card-body">Loading…</div>
+    </section>
 
     <section class="card" id="news-card">
       <h2>News</h2>
@@ -122,20 +143,29 @@
     </div>
 
     <section class="card" id="compare-chart-card">
-      <h2>Price Performance (% change)</h2>
-      <div id="compare-chart-body" class="chart-body">
-        <div class="muted-note">Add 2-4 tickers above to compare.</div>
-      </div>
+      <h2>Price Performance</h2>
+      <div class="tv-chart-wrap"><div id="tv-compare-chart-container"></div></div>
     </section>
 
     <section class="card" id="compare-table-card">
       <h2>Snapshot</h2>
-      <div id="compare-table-body" class="card-body"></div>
+      <div id="compare-table-body" class="card-body"><div class="muted-note">Add 2-4 tickers above to compare.</div></div>
+    </section>
+
+    <section class="card" id="compare-financials-card">
+      <h2>Financial Trends</h2>
+      <div class="tabs" id="compare-fin-tabs">
+        <button class="tab-btn active" data-metric="revenue">Revenue</button>
+        <button class="tab-btn" data-metric="netIncome">Net Income</button>
+        <button class="tab-btn" data-metric="grossMargin">Gross Margin</button>
+      </div>
+      <div id="compare-financials-body" class="card-body"></div>
     </section>
   </div>
 </main>
 
-<script src="app.js?v=202608290013"></script>
+<script src="https://s3.tradingview.com/tv.js"></script>
+<script src="app.js?v=202608290014"></script>
 <script>if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js?v=202608291200');</script>
 </body>
 </html>

@@ -259,20 +259,20 @@ exports.api = onRequest({ secrets: [FMP_API_KEY, FINNHUB_API_KEY], cors: false }
       return res.status(200).json({ balanceSheet, incomeStatement, cashFlow });
     }
 
-    if (endpoint === "history") {
-      // Price charts — Finnhub's candle endpoint is paid-only on the free
-      // tier (confirmed via direct test, 403), but FMP's free tier does
-      // include EOD historical price data, so this stays on FMP (counted
-      // against the 250/day quota, ~1 call per range switch).
+    if (endpoint === "fh-earnings-calendar") {
+      // Free, uncapped on Finnhub — replaces what would otherwise be another
+      // FMP quota hit for "next earnings date."
       if (!ticker || !/^[A-Za-z0-9.\-]{1,10}$/.test(ticker)) {
         return res.status(400).json({ error: "invalid or missing ticker" });
       }
-      const days = { "1m": 30, "6m": 182, "1y": 365, "5y": 365 * 5 }[req.query.range] || 365;
-      const to = new Date();
-      const from = new Date(to.getTime() - days * 24 * 60 * 60 * 1000);
+      const t = ticker.toUpperCase();
+      const from = new Date();
+      const to = new Date(from.getTime() + 180 * 24 * 60 * 60 * 1000);
       const iso = (d) => d.toISOString().slice(0, 10);
-      await fetchFmp(`/historical-price-eod/light?symbol=${ticker.toUpperCase()}&from=${iso(from)}&to=${iso(to)}`, res);
-      return;
+      const url = `${FINNHUB_BASE}/calendar/earnings?symbol=${t}&from=${iso(from)}&to=${iso(to)}&token=${FINNHUB_API_KEY.value()}`;
+      const upstream = await fetch(url);
+      const body = await upstream.text();
+      return res.status(upstream.status).set("Content-Type", "application/json").send(body);
     }
 
     if (endpoint === "transcript") {
