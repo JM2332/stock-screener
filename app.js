@@ -15,9 +15,12 @@ async function api(path) {
   return rawApi(path);
 }
 
-// News runs through Finnhub, not FMP — it has its own, much more generous
-// quota (60/min), so it deliberately doesn't touch the FMP usage pill.
-async function newsApi(path) {
+// Everything Finnhub-backed (news, and now quote/profile/basic ratios/
+// recommendation trends) runs through here instead of api() — Finnhub has
+// its own, much more generous quota (no daily cap, ~60/min) and covers
+// tickers FMP's free tier blocks outright, so these calls deliberately don't
+// touch the FMP usage pill.
+async function finnhubApi(path) {
   return rawApi(path);
 }
 
@@ -168,16 +171,25 @@ function loadTicker(symbol) {
   activeFinTab = "balance";
   [...$("#fin-tabs").children].forEach((b) => b.classList.toggle("active", b.dataset.tab === "balance"));
 
-  // Shared once so the sections that need the same underlying data (quote,
-  // profile, analyst price target) don't each pay for their own call — they
-  // all just await these same in-flight requests.
-  const quotePromise = api(`quote/${symbol}`);
-  const profilePromise = api(`profile/${symbol}`);
+  // Finnhub "core" data — quote/profile/basic ratios/recommendation trends —
+  // works for effectively any US-listed ticker on the free tier, no daily
+  // cap. This is what actually carries the page now; FMP fills in the
+  // extras it uniquely still offers free (DCF, Graham Number, sector P/E,
+  // price targets, forward estimates, clean financial statements) on a
+  // best-effort basis that can fail outright for a ticker FMP doesn't cover
+  // without taking the rest of the page down with it.
+  const fhQuotePromise = finnhubApi(`fh-quote/${symbol}`);
+  const fhProfilePromise = finnhubApi(`fh-profile/${symbol}`);
+  const fhMetricsPromise = finnhubApi(`fh-metrics/${symbol}`);
+  const fhRecPromise = finnhubApi(`fh-recommendation/${symbol}`);
+
+  const fmpQuotePromise = api(`quote/${symbol}`);
+  const fmpProfilePromise = api(`profile/${symbol}`);
   const priceTargetPromise = api(`price-target/${symbol}`);
 
-  loadHero(symbol, quotePromise, profilePromise);
-  loadFairValue(symbol, quotePromise, profilePromise, priceTargetPromise);
-  loadRatings(symbol, priceTargetPromise);
+  loadHero(symbol, fhQuotePromise, fhProfilePromise, fhMetricsPromise, fmpQuotePromise);
+  loadFairValue(symbol, fhQuotePromise, fhMetricsPromise, fmpQuotePromise, fmpProfilePromise, priceTargetPromise);
+  loadRatings(symbol, fhRecPromise, priceTargetPromise);
   loadFinancials(symbol);
   loadNews(symbol);
 }
@@ -216,54 +228,71 @@ function fmtPct(n) {
   return (n * (Math.abs(n) < 1.5 ? 100 : 1)).toFixed(2) + "%";
 }
 
-// ---------- Hero ----------
+// Finnhub's profile exchange field is a messy long form ("NASDAQ NMS - GLOBAL
+// MARKET", "NEW YORK STOCK EXCHANGE, INC.") — normalize the common ones for
+// display; anything unrecognized just falls back to the raw string.
+function normalizeExchange(raw) {
+  if (!raw) return "—";
+  const upper = raw.toUpperCase();
+  if (upper.includes("NASDAQ")) return "NASDAQ";
+  if (upper.includes("NEW YORK STOCK EXCHANGE") || upper.startsWith("NYSE")) return "NYSE";
+  return raw;
+}
 
-async function loadHero(symbol, quotePromise, profilePromise) {
+// ---------- Hero ----------
+// Sourced entirely from Finnhub now — it covers effectively any US-listed
+// ticker for free, unlike FMP's curated whitelist, so the hero card (and
+// the app generally) no longer fails outright for a ticker FMP doesn't
+// cover. "Volume" (today's, not the 3-month average) is the one stat FMP
+// still uniquely provides for free, so it's fetched best-effort and shown
+// as "—" rather than blocking the rest of the card if FMP doesn't have it.
+
+async function loadHero(symbol, fhQuotePromise, fhProfilePromise, fhMetricsPromise, fmpQuotePromise) {
   try {
-    const [quoteArr, profileArr, ratiosRes, incomeRes] = await Promise.all([
-      quotePromise,
-      profilePromise,
-      fetchFinTab("ratios", symbol),
-      fetchFinTab("income", symbol),
-    ]);
-    const q = quoteArr && quoteArr[0];
-    const p = profileArr && profileArr[0];
-    const r = ratiosRes && !ratiosRes.error && ratiosRes.data && ratiosRes.data[0];
-    const inc = incomeRes && !incomeRes.error && incomeRes.data && incomeRes.data[0];
-    if (!q) {
+    const [quote, profile, metrics] = await Promise.all([fhQuotePromise, fhProfilePromise, fhMetricsPromise]);
+    const m = (metrics && metrics.metric) || {};
+
+    if (!quote || quote.c === undefined || quote.c === null) {
       $("#s-name").textContent = "Not found";
       return;
     }
-    $("#s-name").textContent = (p && p.companyName) || q.name || symbol;
-    $("#s-symbol").textContent = q.symbol || symbol;
-    $("#s-exchange").textContent = q.exchange || (p && p.exchangeShortName) || "—";
-    $("#s-sector").textContent = (p && p.sector) || "—";
-    $("#s-price").textContent = "$" + fmtNum(q.price, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
-    const change = q.change;
-    const changePct = q.changePercentage;
+    $("#s-name").textContent = (profile && profile.name) || symbol;
+    $("#s-symbol").textContent = symbol;
+    $("#s-exchange").textContent = normalizeExchange(profile && profile.exchange);
+    $("#s-sector").textContent = (profile && profile.finnhubIndustry) || "—";
+    $("#s-price").textContent = "$" + fmtNum(quote.c, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+    const change = quote.d;
+    const changePct = quote.dp;
     const changeEl = $("#s-change");
     const up = change >= 0;
     changeEl.className = "hero-change " + (up ? "up" : "down");
     changeEl.textContent = `${up ? "+" : ""}${fmtNum(change, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} (${up ? "+" : ""}${fmtNum(changePct, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}%)`;
 
+    let fmpVolume = "—";
+    try {
+      const q = await fmpQuotePromise;
+      if (q && q[0] && q[0].volume) fmpVolume = fmtBig(q[0].volume);
+    } catch {
+      // best-effort only — FMP may not cover this ticker at all
+    }
+
     const stats = [
-      ["Market Cap", fmtBig(q.marketCap ?? (p && p.marketCap))],
-      ["P/E Ratio", r && r.priceToEarningsRatio ? fmtNum(r.priceToEarningsRatio, { maximumFractionDigits: 2 }) : "—"],
-      ["EPS (TTM)", inc && inc.eps ? "$" + fmtNum(inc.eps, { maximumFractionDigits: 2 }) : "—"],
-      ["Day Range", q.dayLow && q.dayHigh ? `$${fmtNum(q.dayLow, { maximumFractionDigits: 2 })} – $${fmtNum(q.dayHigh, { maximumFractionDigits: 2 })}` : "—"],
-      ["52W Range", q.yearLow && q.yearHigh ? `$${fmtNum(q.yearLow, { maximumFractionDigits: 2 })} – $${fmtNum(q.yearHigh, { maximumFractionDigits: 2 })}` : "—"],
-      ["Volume", fmtBig(q.volume)],
-      ["Avg Volume", fmtBig(p && p.averageVolume)],
-      ["Open", q.open ? "$" + fmtNum(q.open, { maximumFractionDigits: 2 }) : "—"],
+      ["Market Cap", profile && profile.marketCapitalization ? fmtBig(profile.marketCapitalization * 1e6) : "—"],
+      ["P/E Ratio", m.peTTM ? fmtNum(m.peTTM, { maximumFractionDigits: 2 }) : "—"],
+      ["EPS (TTM)", m.epsTTM ? "$" + fmtNum(m.epsTTM, { maximumFractionDigits: 2 }) : "—"],
+      ["Day Range", quote.l && quote.h ? `$${fmtNum(quote.l, { maximumFractionDigits: 2 })} – $${fmtNum(quote.h, { maximumFractionDigits: 2 })}` : "—"],
+      ["52W Range", m["52WeekLow"] && m["52WeekHigh"] ? `$${fmtNum(m["52WeekLow"], { maximumFractionDigits: 2 })} – $${fmtNum(m["52WeekHigh"], { maximumFractionDigits: 2 })}` : "—"],
+      ["Volume", fmpVolume],
+      ["Avg Volume (3mo)", m["3MonthAverageTradingVolume"] ? fmtBig(m["3MonthAverageTradingVolume"] * 1e6) : "—"],
+      ["Open", quote.o ? "$" + fmtNum(quote.o, { maximumFractionDigits: 2 }) : "—"],
     ];
     $("#s-stats").innerHTML = stats
       .map(([label, value]) => `<div class="stat-item"><span class="stat-label">${label}</span><span class="stat-value">${value}</span></div>`)
       .join("");
   } catch (err) {
-    $("#s-name").textContent = err.status === 402 || err.status === 403
-      ? "Not available on the free FMP plan"
-      : "Couldn't load this ticker";
+    $("#s-name").textContent = "Couldn't load this ticker";
   }
 }
 
@@ -280,19 +309,40 @@ function verdictFor(diffPct) {
   return { verdict: "Fair", cls: "fair" };
 }
 
-async function loadFairValue(symbol, quotePromise, profilePromise, priceTargetPromise) {
+// Distinguishes "FMP doesn't cover this ticker" (402/403, permanent for that
+// ticker) from "today's 250-call quota is used up" (429, temporary and
+// nothing to do with which ticker this is) — very different messages for
+// the user, so this shouldn't be flattened into one generic failure.
+function fmpFailureKind(results) {
+  const rejected = results.filter((r) => r.status === "rejected");
+  if (!rejected.length) return null;
+  if (rejected.some((r) => r.reason && r.reason.status === 429)) return "rate-limited";
+  if (rejected.every((r) => r.reason && (r.reason.status === 402 || r.reason.status === 403))) return "blocked";
+  return "error";
+}
+
+function fmpFailureNote(kind, fallback) {
+  if (kind === "rate-limited") return "Today's free FMP quota (250 calls) is used up — this will come back once it resets.";
+  return fallback;
+}
+
+async function loadFairValue(symbol, fhQuotePromise, fhMetricsPromise, fmpQuotePromise, fmpProfilePromise, priceTargetPromise) {
   const el = $("#fv-body");
   try {
-    const [quoteRes, profileRes, dcfRes, incomeRes, kmRes, ptRes] = await Promise.allSettled([
-      quotePromise,
-      profilePromise,
+    const [fhQuoteRes, fhMetricsRes, fmpQuoteRes, fmpProfileRes, dcfRes, kmRes, ptRes] = await Promise.allSettled([
+      fhQuotePromise,
+      fhMetricsPromise,
+      fmpQuotePromise,
+      fmpProfilePromise,
       api(`dcf/${symbol}`),
-      fetchFinTab("income", symbol),
       api(`key-metrics/${symbol}`),
       priceTargetPromise,
     ]);
 
-    const price = quoteRes.status === "fulfilled" && quoteRes.value[0] && quoteRes.value[0].price;
+    // Price always comes from Finnhub — it's guaranteed available and keeps
+    // this card consistent with the hero, even when every FMP method below
+    // fails outright for a ticker FMP doesn't cover.
+    const price = fhQuoteRes.status === "fulfilled" && fhQuoteRes.value && fhQuoteRes.value.c;
     if (!price) {
       el.innerHTML = `<div class="muted-note">Fair value data isn't available for this ticker.</div>`;
       return;
@@ -316,11 +366,13 @@ async function loadFairValue(symbol, quotePromise, profilePromise, priceTargetPr
       });
     }
 
-    const inc = incomeRes.status === "fulfilled" && !incomeRes.value.error && incomeRes.value.data && incomeRes.value.data[0];
-    const eps = inc && inc.eps;
-    const profile = profileRes.status === "fulfilled" && profileRes.value[0];
+    // EPS comes from Finnhub (always available); sector + exchange still
+    // need FMP's own taxonomy since sector-pe-snapshot's sector names have
+    // to match FMP's categories exactly — Finnhub's industry strings don't.
+    const eps = fhMetricsRes.status === "fulfilled" && fhMetricsRes.value && fhMetricsRes.value.metric && fhMetricsRes.value.metric.epsTTM;
+    const profile = fmpProfileRes.status === "fulfilled" && fmpProfileRes.value[0];
     const sector = profile && profile.sector;
-    const exchange = quoteRes.status === "fulfilled" && quoteRes.value[0] && quoteRes.value[0].exchange;
+    const exchange = fmpQuoteRes.status === "fulfilled" && fmpQuoteRes.value[0] && fmpQuoteRes.value[0].exchange;
     if (eps && sector && exchange) {
       try {
         const sectorPe = await api(`sector-pe?sector=${encodeURIComponent(sector)}&exchange=${encodeURIComponent(exchange)}`);
@@ -345,7 +397,11 @@ async function loadFairValue(symbol, quotePromise, profilePromise, priceTargetPr
     }
 
     if (!methods.length) {
-      el.innerHTML = `<div class="muted-note">Fair value data isn't available for this ticker.</div>`;
+      const kind = fmpFailureKind([fmpQuoteRes, fmpProfileRes, dcfRes, kmRes, ptRes]);
+      const fallback = kind === "blocked"
+        ? `Fair value methods aren't available for this ticker on the free FMP plan. Current price: $${fmtNum(price, { maximumFractionDigits: 2 })}.`
+        : "Fair value data isn't available for this ticker.";
+      el.innerHTML = `<div class="muted-note">${fmpFailureNote(kind, fallback)}</div>`;
       return;
     }
 
@@ -380,36 +436,36 @@ async function loadFairValue(symbol, quotePromise, profilePromise, priceTargetPr
       </div>
       <div class="fv-methods">${rows}</div>`;
   } catch (err) {
-    el.innerHTML = err.status === 403 || err.status === 402
-      ? `<div class="muted-note">Fair value requires a higher Financial Modeling Prep plan.</div>`
-      : `<div class="error-note">Couldn't load fair value.</div>`;
+    el.innerHTML = `<div class="error-note">Couldn't load fair value.</div>`;
   }
 }
 
 // ---------- Ratings & estimates ----------
 
-async function loadRatings(symbol, priceTargetPromise) {
+async function loadRatings(symbol, fhRecPromise, priceTargetPromise) {
   const el = $("#ratings-body");
   const results = await Promise.allSettled([
-    api(`grades-consensus/${symbol}`),
+    fhRecPromise,
     api(`ratings-snapshot/${symbol}`),
     priceTargetPromise,
     api(`grades/${symbol}`),
     api(`estimates/${symbol}`),
   ]);
-  const [consensusRes, snapshotRes, ptRes, gradesRes, estRes] = results;
+  const [recRes, snapshotRes, ptRes, gradesRes, estRes] = results;
 
   const rows = [];
 
-  if (consensusRes.status === "fulfilled" && consensusRes.value && consensusRes.value[0]) {
-    const c = consensusRes.value[0];
-    const rec = (c.consensus || "").toLowerCase();
-    const badgeCls = rec.includes("buy") ? "buy" : rec.includes("sell") ? "sell" : "hold";
-    rows.push(`<div class="rating-row"><span class="rating-label">Analyst Consensus</span><span class="badge ${badgeCls}">${c.consensus || "—"}</span></div>`);
-    const total = (c.strongBuy || 0) + (c.buy || 0) + (c.hold || 0) + (c.sell || 0) + (c.strongSell || 0);
-    if (total) {
-      rows.push(`<div class="rating-row"><span class="rating-label">Breakdown</span><span class="rating-value">${c.strongBuy + c.buy} buy · ${c.hold} hold · ${c.sell + c.strongSell} sell</span></div>`);
-    }
+  // Finnhub recommendation trends: always available on the free tier, so
+  // this is the one row guaranteed to show even for a ticker FMP blocks.
+  if (recRes.status === "fulfilled" && Array.isArray(recRes.value) && recRes.value.length) {
+    const c = recRes.value[0]; // most recent period first
+    const buyish = (c.strongBuy || 0) + (c.buy || 0);
+    const sellish = (c.strongSell || 0) + (c.sell || 0);
+    const holdish = c.hold || 0;
+    const label = buyish >= holdish && buyish >= sellish ? "Buy" : sellish >= holdish ? "Sell" : "Hold";
+    const badgeCls = label === "Buy" ? "buy" : label === "Sell" ? "sell" : "hold";
+    rows.push(`<div class="rating-row"><span class="rating-label">Analyst Consensus (${c.period || ""})</span><span class="badge ${badgeCls}">${label}</span></div>`);
+    rows.push(`<div class="rating-row"><span class="rating-label">Breakdown</span><span class="rating-value">${buyish} buy · ${holdish} hold · ${sellish} sell</span></div>`);
   }
 
   if (snapshotRes.status === "fulfilled" && snapshotRes.value && snapshotRes.value[0]) {
@@ -434,13 +490,17 @@ async function loadRatings(symbol, priceTargetPromise) {
     rows.push(`<div class="rating-row"><span class="rating-label">Est. EPS (FY${(e.date || "").slice(0, 4)})</span><span class="rating-value">${e.epsAvg ? "$" + fmtNum(e.epsAvg, { maximumFractionDigits: 2 }) : "—"}</span></div>`);
   }
 
-  const allFailed = results.every((r) => r.status === "rejected");
-  const anyPaywalled = results.some((r) => r.status === "rejected" && (r.reason.status === 403 || r.reason.status === 402));
-
   if (!rows.length) {
-    el.innerHTML = allFailed && anyPaywalled
-      ? `<div class="muted-note">Analyst ratings require a higher Financial Modeling Prep plan.</div>`
-      : `<div class="muted-note">No analyst data available for this ticker.</div>`;
+    el.innerHTML = `<div class="muted-note">No analyst data available for this ticker.</div>`;
+    return;
+  }
+
+  const fmpResults = results.slice(1);
+  const fmpRowsShown = fmpResults.some((r) => r.status === "fulfilled");
+  if (!fmpRowsShown) {
+    const kind = fmpFailureKind(fmpResults);
+    const note = fmpFailureNote(kind, "Price target, latest grade action, and forward estimates aren't available for this ticker on the free FMP plan.");
+    el.innerHTML = rows.join("") + `<div class="muted-note" style="margin-top:10px">${note}</div>`;
     return;
   }
   el.innerHTML = rows.join("");
@@ -508,9 +568,13 @@ async function renderFinTab() {
   if (symbol !== currentSymbol || tab !== activeFinTab) return; // stale response, ticker/tab changed since
 
   if (result.error || !Array.isArray(result.data) || !result.data.length) {
-    el.innerHTML = result.error && (result.error.status === 403 || result.error.status === 402)
-      ? `<div class="muted-note">This statement requires a higher Financial Modeling Prep plan.</div>`
-      : `<div class="muted-note">No data available.</div>`;
+    let msg = "No data available.";
+    if (result.error && result.error.status === 429) {
+      msg = fmpFailureNote("rate-limited");
+    } else if (result.error && (result.error.status === 403 || result.error.status === 402)) {
+      msg = "This statement isn't available for this ticker on the free FMP plan.";
+    }
+    el.innerHTML = `<div class="muted-note">${msg}</div>`;
     return;
   }
 
@@ -542,12 +606,12 @@ async function renderFinTab() {
 // ---------- News ----------
 // FMP restricted every news endpoint to paid plans, so this runs through
 // Finnhub's free company-news endpoint instead (proxied the same way, key
-// hidden server-side) — see newsApi() above for why it skips the FMP pill.
+// hidden server-side) — see finnhubApi() above for why it skips the FMP pill.
 
 async function loadNews(symbol) {
   const el = $("#news-body");
   try {
-    const items = await newsApi(`news/${symbol}`);
+    const items = await finnhubApi(`news/${symbol}`);
     if (!Array.isArray(items) || !items.length) {
       el.innerHTML = `<div class="muted-note">No recent news found in the last 14 days.</div>`;
       return;

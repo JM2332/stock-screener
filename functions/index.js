@@ -78,6 +78,27 @@ exports.api = onRequest({ secrets: [FMP_API_KEY, FINNHUB_API_KEY], cors: false }
       return res.status(upstream.status).set("Content-Type", "application/json").send(body);
     }
 
+    // Finnhub-backed "core" data — quote/profile/basic ratios/recommendation
+    // trends all work on Finnhub's free tier for effectively any US-listed
+    // ticker (no per-symbol whitelist like FMP has), so these carry the hero
+    // card and give it something to show even for tickers FMP itself blocks.
+    if (endpoint === "fh-quote" || endpoint === "fh-profile" || endpoint === "fh-metrics" || endpoint === "fh-recommendation") {
+      if (!ticker || !/^[A-Za-z0-9.\-]{1,10}$/.test(ticker)) {
+        return res.status(400).json({ error: "invalid or missing ticker" });
+      }
+      const t = ticker.toUpperCase();
+      const path = {
+        "fh-quote": `/quote?symbol=${t}`,
+        "fh-profile": `/stock/profile2?symbol=${t}`,
+        "fh-metrics": `/stock/metric?symbol=${t}&metric=all`,
+        "fh-recommendation": `/stock/recommendation?symbol=${t}`,
+      }[endpoint];
+      const url = `${FINNHUB_BASE}${path}&token=${FINNHUB_API_KEY.value()}`;
+      const upstream = await fetch(url);
+      const body = await upstream.text();
+      return res.status(upstream.status).set("Content-Type", "application/json").send(body);
+    }
+
     if (endpoint === "sector-pe") {
       const sector = req.query.sector;
       const exchange = req.query.exchange;
