@@ -287,7 +287,13 @@ async function loadHero(symbol, fhQuotePromise, fhProfilePromise, fhMetricsPromi
       .map(([label, value]) => `<div class="stat-item"><span class="stat-label">${label}</span><span class="stat-value">${value}</span></div>`)
       .join("");
   } catch (err) {
-    $("#s-name").textContent = "Couldn't load this ticker";
+    // Finnhub's free tier reliably 403s on non-US-listed tickers (e.g. LSE's
+    // RR.L for Rolls-Royce) — this tool is US-stocks-only for now, so that's
+    // worth saying plainly rather than a generic "couldn't load" that reads
+    // like a bug.
+    $("#s-name").textContent = err.status === 403
+      ? "Not a supported market — this tool covers US-listed stocks only"
+      : "Couldn't load this ticker";
   }
 }
 

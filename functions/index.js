@@ -265,13 +265,27 @@ exports.api = onRequest({ secrets: [FMP_API_KEY, FINNHUB_API_KEY], cors: false }
       // both symbol and company name, where FMP needed two separate calls.
       const q = req.query.q;
       if (!q) return res.status(400).json({ error: "missing q param" });
-      const url = `${FINNHUB_BASE}/search?q=${encodeURIComponent(q)}&token=${FINNHUB_API_KEY.value()}`;
-      const upstream = await fetch(url);
-      const body = await upstream.json().catch(() => null);
-      if (!upstream.ok || !body) {
-        return res.status(upstream.status).json(body || { error: "search failed" });
+
+      const runFinnhubSearch = async (query) => {
+        const url = `${FINNHUB_BASE}/search?q=${encodeURIComponent(query)}&token=${FINNHUB_API_KEY.value()}`;
+        const upstream = await fetch(url);
+        const body = await upstream.json().catch(() => null);
+        return { ok: upstream.ok, status: upstream.status, body };
+      };
+
+      let result = await runFinnhubSearch(q);
+      // Finnhub's search doesn't reliably match a hyphenated official name
+      // against a space-separated query — "rolls royce" finds nothing, but
+      // "rolls-royce" finds Rolls-Royce Holdings PLC. Retry once with spaces
+      // collapsed onto hyphens before giving up.
+      if (result.ok && (!result.body || !result.body.result || !result.body.result.length) && q.includes(" ")) {
+        result = await runFinnhubSearch(q.replace(/\s+/g, "-"));
       }
-      const results = (body.result || []).slice(0, 10).map((r) => ({ symbol: r.symbol, name: r.description, type: r.type }));
+
+      if (!result.ok || !result.body) {
+        return res.status(result.status || 502).json(result.body || { error: "search failed" });
+      }
+      const results = (result.body.result || []).slice(0, 10).map((r) => ({ symbol: r.symbol, name: r.description, type: r.type }));
       return res.status(200).json(results);
     }
 
