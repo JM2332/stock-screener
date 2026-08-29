@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Stock Screener</title>
+<link rel="stylesheet" href="style.css?v=202608290002" />
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="brand-mark">S</span>
+    <span class="brand-name">Screener</span>
+  </div>
+  <div class="search-wrap">
+    <input id="search-input" type="text" autocomplete="off" spellcheck="false"
+      placeholder="Search ticker or company (e.g. AAPL, Microsoft)" />
+    <div id="search-results" class="search-results hidden"></div>
+  </div>
+  <div id="usage-pill" class="usage-pill" title="Financial Modeling Prep free tier resets daily">0 / 250 today</div>
+</header>
+
+<main id="app">
+  <div id="empty-state" class="empty-state">
+    <div class="empty-icon">◎</div>
+    <p>Search a ticker to pull up a full picture — quote, fair value, ratings, financials and news.</p>
+  </div>
+
+  <div id="stock-view" class="stock-view hidden">
+
+    <section class="hero-card">
+      <div class="hero-top">
+        <div>
+          <div class="hero-name" id="s-name">—</div>
+          <div class="hero-sub"><span id="s-symbol">—</span> · <span id="s-exchange">—</span> · <span id="s-sector">—</span></div>
+        </div>
+        <div class="hero-price-block">
+          <div class="hero-price" id="s-price">—</div>
+          <div class="hero-change" id="s-change">—</div>
+        </div>
+      </div>
+      <div class="hero-stats" id="s-stats"></div>
+    </section>
+
+    <section class="card fair-value-card" id="fv-card">
+      <h2>Fair Value</h2>
+      <div id="fv-body" class="fv-body">Loading…</div>
+    </section>
+
+    <div class="grid-2">
+      <section class="card" id="ratings-card">
+        <h2>Analyst Ratings &amp; Estimates</h2>
+        <div id="ratings-body" class="card-body">Loading…</div>
+      </section>
+
+      <section class="card" id="financials-card">
+        <h2>Financials</h2>
+        <div class="tabs" id="fin-tabs">
+          <button class="tab-btn active" data-tab="balance">Balance Sheet</button>
+          <button class="tab-btn" data-tab="income">Income</button>
+          <button class="tab-btn" data-tab="cashflow">Cash Flow</button>
+          <button class="tab-btn" data-tab="ratios">Ratios</button>
+        </div>
+        <div id="fin-body" class="card-body">Loading…</div>
+      </section>
+    </div>
+
+    <section class="card" id="news-card">
+      <h2>News</h2>
+      <div id="news-body" class="news-body">Loading…</div>
+    </section>
+
+  </div>
+</main>
+
+<script src="app.js?v=202608290002"></script>
+</body>
+</html>
