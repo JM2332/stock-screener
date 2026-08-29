@@ -21,6 +21,7 @@ const ENDPOINTS = {
   grades: (t) => `/grades?symbol=${t}`,
   "price-target": (t) => `/price-target-consensus?symbol=${t}`,
   estimates: (t) => `/analyst-estimates?symbol=${t}&period=annual&limit=8`,
+  "transcript-dates": (t) => `/earning-call-transcript-dates?symbol=${t}`,
 };
 
 // sector-pe-snapshot is keyed by exchange+date, not by ticker, so it's worth
@@ -271,6 +272,23 @@ exports.api = onRequest({ secrets: [FMP_API_KEY, FINNHUB_API_KEY], cors: false }
       const from = new Date(to.getTime() - days * 24 * 60 * 60 * 1000);
       const iso = (d) => d.toISOString().slice(0, 10);
       await fetchFmp(`/historical-price-eod/light?symbol=${ticker.toUpperCase()}&from=${iso(from)}&to=${iso(to)}`, res);
+      return;
+    }
+
+    if (endpoint === "transcript") {
+      // Full earnings call transcript for one specific quarter — a real
+      // payload (can be 10,000+ words), so this is fetched on demand only
+      // (the client fetches transcript-dates first, cheaply, and only pulls
+      // a transcript's content when the user picks a specific quarter).
+      if (!ticker || !/^[A-Za-z0-9.\-]{1,10}$/.test(ticker)) {
+        return res.status(400).json({ error: "invalid or missing ticker" });
+      }
+      const year = req.query.year;
+      const quarter = req.query.quarter;
+      if (!year || !quarter || !/^\d{4}$/.test(year) || !/^\d$/.test(quarter)) {
+        return res.status(400).json({ error: "missing or invalid year/quarter" });
+      }
+      await fetchFmp(`/earning-call-transcript?symbol=${ticker.toUpperCase()}&year=${year}&quarter=${quarter}`, res);
       return;
     }
 

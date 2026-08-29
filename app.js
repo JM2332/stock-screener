@@ -558,6 +558,8 @@ function setLoadingStates() {
   $("#ratings-body").innerHTML = `<div class="spinner-line">Loading…</div>`;
   $("#fin-body").innerHTML = `<div class="spinner-line">Loading…</div>`;
   $("#news-body").innerHTML = `<div class="spinner-line">Loading…</div>`;
+  showTranscriptLoadButton();
+  $("#research-links-body").innerHTML = "";
 }
 
 function fmtNum(n, opts = {}) {
@@ -605,6 +607,7 @@ async function loadHero(symbol, fhQuotePromise, fhProfilePromise, fhMetricsPromi
 
     $("#s-name").textContent = (profile && profile.name) || symbol;
     $("#s-symbol").textContent = symbol;
+    loadResearchLinks(symbol, profile && profile.name);
     $("#s-exchange").textContent = normalizeExchange(profile && profile.exchange);
     $("#s-sector").textContent = (profile && profile.finnhubIndustry) || "—";
     $("#s-price").textContent = "$" + fmtNum(quote.c, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -1146,4 +1149,101 @@ async function loadNews(symbol) {
       ? `<div class="muted-note">News requires a paid Finnhub plan.</div>`
       : `<div class="error-note">Couldn't load news.</div>`;
   }
+}
+
+// ---------- Earnings call transcripts ----------
+// Fourth of four build-out items. Confirmed available on FMP's free tier —
+// requesting one returned 429 (quota exhausted) rather than 402/403 (paid
+// only), the same signal every other free-tier-but-capped endpoint gives.
+// The dates list is cheap and lazy (button click, not eager on every ticker
+// load); full transcript text is a real payload, so that's fetched only
+// when a specific quarter is picked, never prefetched for all of them.
+
+// One delegated listener on the never-replaced container, since its inner
+// content (button → list → transcript text) gets swapped via innerHTML
+// repeatedly — a listener bound directly to an inner button would be
+// destroyed the moment that button's parent markup is replaced.
+$("#transcript-body").addEventListener("click", (e) => {
+  if (e.target.closest("#transcript-load-btn")) {
+    loadTranscriptDatesList();
+  } else if (e.target.closest(".transcript-back")) {
+    showTranscriptLoadButton();
+  } else {
+    const row = e.target.closest(".transcript-row");
+    if (row) loadTranscriptContent(currentSymbol, row.dataset.year, row.dataset.quarter);
+  }
+});
+
+function showTranscriptLoadButton() {
+  $("#transcript-body").innerHTML = `<button id="transcript-load-btn" class="tab-btn">Show available transcripts</button>`;
+}
+
+async function loadTranscriptDatesList() {
+  const symbol = currentSymbol;
+  const el = $("#transcript-body");
+  el.innerHTML = `<div class="spinner-line">Loading…</div>`;
+  try {
+    const dates = await api(`transcript-dates/${symbol}`);
+    if (symbol !== currentSymbol) return; // ticker changed while this was in flight
+    renderTranscriptList(dates);
+  } catch (err) {
+    if (symbol !== currentSymbol) return;
+    const msg = err.status === 429
+      ? fmpFailureNote("rate-limited")
+      : err.status === 402 || err.status === 403
+      ? "Transcripts aren't available for this ticker on the free FMP plan."
+      : "Couldn't load transcript list.";
+    el.innerHTML = `<div class="muted-note">${msg}</div>`;
+  }
+}
+
+function renderTranscriptList(dates) {
+  const el = $("#transcript-body");
+  if (!Array.isArray(dates) || !dates.length) {
+    el.innerHTML = `<div class="muted-note">No transcripts found for this ticker.</div>`;
+    return;
+  }
+  el.innerHTML = dates
+    .slice(0, 12)
+    .map(
+      (d) => `<div class="transcript-row" data-year="${d.fiscalYear}" data-quarter="${d.quarter}">
+        <span>Q${d.quarter} ${d.fiscalYear}</span><span class="muted-note">${d.date || ""}</span>
+      </div>`
+    )
+    .join("");
+}
+
+async function loadTranscriptContent(symbol, year, quarter) {
+  const el = $("#transcript-body");
+  el.innerHTML = `<div class="spinner-line">Loading transcript…</div>`;
+  try {
+    const result = await api(`transcript/${symbol}?year=${year}&quarter=${quarter}`);
+    if (symbol !== currentSymbol) return;
+    const entry = Array.isArray(result) ? result[0] : result;
+    el.innerHTML = entry && entry.content
+      ? `<button class="transcript-back">← Back to list</button><div class="transcript-text">${entry.content.replace(/</g, "&lt;")}</div>`
+      : `<button class="transcript-back">← Back to list</button><div class="muted-note">Transcript content unavailable.</div>`;
+  } catch (err) {
+    if (symbol !== currentSymbol) return;
+    const msg = err.status === 429 ? fmpFailureNote("rate-limited") : "Couldn't load this transcript.";
+    el.innerHTML = `<button class="transcript-back">← Back to list</button><div class="muted-note">${msg}</div>`;
+  }
+}
+
+// ---------- External research links ----------
+// Zero API cost, zero quota impact — plain link-outs. "All published market
+// research" isn't something any single free API aggregates, so this is
+// scoped down to direct links to the sites people actually check by hand.
+
+function loadResearchLinks(symbol, companyName) {
+  const q = encodeURIComponent(companyName || symbol);
+  const links = [
+    ["Seeking Alpha", `https://seekingalpha.com/symbol/${symbol}`],
+    ["Yahoo Finance", `https://finance.yahoo.com/quote/${symbol}`],
+    ["SEC Filings", `https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&company=${symbol}&type=10-K&dateb=&owner=include&count=40`],
+    ["Google News", `https://www.google.com/search?q=${q}&tbm=nws`],
+  ];
+  $("#research-links-body").innerHTML = links
+    .map(([label, url]) => `<a class="research-link" href="${url}" target="_blank" rel="noopener noreferrer">${label} <span class="arrow">↗</span></a>`)
+    .join("");
 }

@@ -10,7 +10,7 @@
 <meta name="apple-mobile-web-app-capable" content="yes" />
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
 <meta name="apple-mobile-web-app-title" content="Screener" />
-<link rel="stylesheet" href="style.css?v=202608290006" />
+<link rel="stylesheet" href="style.css?v=202608290007" />
 <script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore-compat.js"></script>
 </head>
@@ -99,6 +99,18 @@
       <div id="news-body" class="news-body">Loading…</div>
     </section>
 
+    <section class="card" id="transcript-card">
+      <h2>Earnings Call Transcripts</h2>
+      <div id="transcript-body" class="card-body">
+        <button id="transcript-load-btn" class="tab-btn">Show available transcripts</button>
+      </div>
+    </section>
+
+    <section class="card" id="research-card">
+      <h2>More Research</h2>
+      <div id="research-links-body" class="research-links"></div>
+    </section>
+
   </div>
 
   <div id="compare-view" class="compare-view hidden">
@@ -123,7 +135,7 @@
   </div>
 </main>
 
-<script src="app.js?v=202608290012"></script>
+<script src="app.js?v=202608290013"></script>
 <script>if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js?v=202608291200');</script>
 </body>
 </html>

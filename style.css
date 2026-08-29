@@ -368,3 +368,37 @@ table.compare-table th, table.compare-table td { text-align: right; padding: 8px
 table.compare-table th:first-child, table.compare-table td:first-child { text-align: left; color: var(--text-dim); }
 table.compare-table thead th { color: var(--text-faint); font-weight: 500; font-size: 11.5px; border-bottom: 1px solid var(--card-border); }
 table.compare-table tbody tr:hover { background: var(--bg-elevated); }
+
+/* Transcripts */
+.transcript-row {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 10px 0; border-bottom: 1px solid var(--card-border);
+  cursor: pointer;
+}
+.transcript-row:last-child { border-bottom: none; }
+.transcript-row:hover { color: var(--accent); }
+.transcript-back {
+  background: none; border: none; color: var(--accent);
+  font-size: 12.5px; font-weight: 600; cursor: pointer; padding: 0 0 12px;
+}
+.transcript-text {
+  font-size: 13px; line-height: 1.7; color: var(--text-dim);
+  max-height: 420px; overflow-y: auto; white-space: pre-wrap;
+  padding-right: 6px;
+}
+
+/* External research links */
+.research-links { display: flex; flex-wrap: wrap; gap: 10px; }
+.research-link {
+  display: flex; align-items: center; gap: 8px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--card-border);
+  border-radius: var(--radius-sm);
+  padding: 10px 14px;
+  font-size: 13px;
+  font-weight: 600;
+  text-decoration: none;
+  color: var(--text);
+}
+.research-link:hover { border-color: var(--accent); color: var(--accent); }
+.research-link .arrow { color: var(--text-faint); font-size: 12px; }
