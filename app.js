@@ -275,9 +275,235 @@ document.addEventListener("click", (e) => {
   if (!e.target.closest(".watchlist-wrap")) $("#watchlist-panel").classList.add("hidden");
 });
 
+// ---------- Compare tickers ----------
+// Third of four build-out items. Fetches quote/profile/metrics (Finnhub,
+// uncapped) plus a 1Y price history (FMP, quota-counted — same per-ticker
+// cost as viewing an individual chart) for each ticker, in parallel.
+
+const COMPARE_COLORS = ["#5b8cff", "#34d399", "#fbbf24", "#f87171"];
+const compareView = $("#compare-view");
+const compareInput = $("#compare-input");
+const compareSearchResults = $("#compare-search-results");
+let compareMode = false;
+let compareTickers = [];
+let compareSearchDebounce = null;
+
+$("#compare-toggle").addEventListener("click", () => {
+  if (compareMode) {
+    exitCompareMode();
+  } else {
+    stockView.classList.add("hidden");
+    emptyState.classList.add("hidden");
+    hideSearchResults();
+    compareMode = true;
+    $("#compare-toggle").classList.add("active");
+    compareView.classList.remove("hidden");
+  }
+});
+
+function exitCompareMode() {
+  if (!compareMode) return;
+  compareMode = false;
+  $("#compare-toggle").classList.remove("active");
+  compareView.classList.add("hidden");
+  if (!currentSymbol) emptyState.classList.remove("hidden");
+}
+
+compareInput.addEventListener("input", () => {
+  const q = compareInput.value.trim();
+  clearTimeout(compareSearchDebounce);
+  if (!q) {
+    compareSearchResults.classList.add("hidden");
+    return;
+  }
+  compareSearchDebounce = setTimeout(() => runCompareSearch(q), 250);
+});
+
+document.addEventListener("click", (e) => {
+  if (!e.target.closest(".compare-toolbar")) compareSearchResults.classList.add("hidden");
+});
+
+async function runCompareSearch(q) {
+  let items;
+  try {
+    items = await freeApi(`search?q=${encodeURIComponent(q)}`);
+  } catch {
+    compareSearchResults.innerHTML = `<div class="search-empty">Search failed — try again</div>`;
+    compareSearchResults.classList.remove("hidden");
+    return;
+  }
+  const list = Array.isArray(items) ? items : [];
+  if (!list.length) {
+    compareSearchResults.innerHTML = `<div class="search-empty">No matches</div>`;
+    compareSearchResults.classList.remove("hidden");
+    return;
+  }
+  compareSearchResults.innerHTML = list
+    .map((it) => `
+      <div class="search-row" data-symbol="${it.symbol}">
+        <span class="search-row-symbol">${it.symbol}</span>
+        <span class="search-row-name">${it.name || ""}</span>
+      </div>`)
+    .join("");
+  compareSearchResults.classList.remove("hidden");
+  compareSearchResults.querySelectorAll(".search-row").forEach((row) => {
+    row.addEventListener("click", () => {
+      addCompareTicker(row.dataset.symbol);
+      compareInput.value = "";
+      compareSearchResults.classList.add("hidden");
+    });
+  });
+}
+
+function addCompareTicker(symbol) {
+  if (compareTickers.includes(symbol) || compareTickers.length >= 4) return;
+  compareTickers.push(symbol);
+  renderCompareChips();
+  loadCompareData();
+}
+
+function removeCompareTicker(symbol) {
+  compareTickers = compareTickers.filter((s) => s !== symbol);
+  renderCompareChips();
+  loadCompareData();
+}
+
+function renderCompareChips() {
+  $("#compare-chips").innerHTML = compareTickers
+    .map(
+      (sym, i) => `
+      <div class="compare-chip">
+        <span class="chip-dot" style="background:${COMPARE_COLORS[i]}"></span>
+        ${sym}
+        <button data-symbol="${sym}" title="Remove">×</button>
+      </div>`
+    )
+    .join("");
+  $("#compare-chips")
+    .querySelectorAll("button")
+    .forEach((btn) => btn.addEventListener("click", () => removeCompareTicker(btn.dataset.symbol)));
+}
+
+async function loadCompareData() {
+  const tickers = compareTickers.slice();
+  if (!tickers.length) {
+    $("#compare-chart-body").innerHTML = `<div class="muted-note">Add 2-4 tickers above to compare.</div>`;
+    $("#compare-table-body").innerHTML = "";
+    return;
+  }
+  $("#compare-chart-body").innerHTML = `<div class="spinner-line">Loading…</div>`;
+  $("#compare-table-body").innerHTML = `<div class="spinner-line">Loading…</div>`;
+
+  const results = await Promise.all(
+    tickers.map(async (symbol) => {
+      const [quoteRes, profileRes, metricsRes, historyRes] = await Promise.allSettled([
+        freeApi(`fh-quote/${symbol}`),
+        freeApi(`fh-profile/${symbol}`),
+        freeApi(`fh-metrics/${symbol}`),
+        api(`history/${symbol}?range=1y`),
+      ]);
+      return {
+        symbol,
+        quote: quoteRes.status === "fulfilled" ? quoteRes.value : null,
+        profile: profileRes.status === "fulfilled" ? profileRes.value : null,
+        metrics: metricsRes.status === "fulfilled" ? metricsRes.value : null,
+        history: historyRes.status === "fulfilled" ? historyRes.value : null,
+        historyError: historyRes.status === "rejected" ? historyRes.reason : null,
+      };
+    })
+  );
+
+  if (compareTickers.join(",") !== tickers.join(",")) return; // stale — selection changed mid-fetch
+
+  renderCompareChart(results);
+  renderCompareTable(results);
+}
+
+function renderCompareChart(results) {
+  const withHistory = results.filter((r) => Array.isArray(r.history) && r.history.length > 1);
+  if (!withHistory.length) {
+    const rateLimited = results.some((r) => r.historyError && r.historyError.status === 429);
+    $("#compare-chart-body").innerHTML = `<div class="muted-note">${rateLimited ? fmpFailureNote("rate-limited") : "Not enough price history available for these tickers yet."}</div>`;
+    return;
+  }
+
+  const W = 700, H = 220, padX = 4, padY = 12;
+  const series = withHistory.map((r) => {
+    const points = r.history.slice().sort((a, b) => (a.date < b.date ? -1 : 1));
+    const base = points[0].price;
+    return {
+      symbol: r.symbol,
+      color: COMPARE_COLORS[results.indexOf(r)] || "var(--text-faint)",
+      pct: points.map((p) => ((p.price - base) / base) * 100),
+    };
+  });
+
+  const allPct = series.flatMap((s) => s.pct);
+  const min = Math.min(...allPct, 0);
+  const max = Math.max(...allPct, 0);
+  const spanRange = max - min || 1;
+
+  const paths = series
+    .map((s) => {
+      const stepX = s.pct.length > 1 ? (W - padX * 2) / (s.pct.length - 1) : 0;
+      const d = s.pct
+        .map((v, i) => {
+          const x = padX + i * stepX;
+          const y = padY + (H - padY * 2) * (1 - (v - min) / spanRange);
+          return `${i === 0 ? "M" : "L"}${x.toFixed(2)},${y.toFixed(2)}`;
+        })
+        .join(" ");
+      return `<path d="${d}" style="fill:none;stroke:${s.color};stroke-width:2"></path>`;
+    })
+    .join("");
+
+  const zeroY = padY + (H - padY * 2) * (1 - (0 - min) / spanRange);
+  const zeroLine = `<line x1="${padX}" y1="${zeroY.toFixed(2)}" x2="${W - padX}" y2="${zeroY.toFixed(2)}" style="stroke:var(--card-border);stroke-width:1;stroke-dasharray:4 4"></line>`;
+
+  const legend = series
+    .map((s) => {
+      const lastPct = s.pct[s.pct.length - 1];
+      return `<div class="compare-legend-item"><span class="chip-dot" style="background:${s.color}"></span>${s.symbol} ${lastPct >= 0 ? "+" : ""}${lastPct.toFixed(1)}%</div>`;
+    })
+    .join("");
+
+  $("#compare-chart-body").innerHTML = `
+    <svg viewBox="0 0 ${W} ${H}" class="price-chart" preserveAspectRatio="none">${zeroLine}${paths}</svg>
+    <div class="compare-legend">${legend}</div>`;
+}
+
+function metricVal(r, key) {
+  return r.metrics && r.metrics.metric ? r.metrics.metric[key] : undefined;
+}
+
+function renderCompareTable(results) {
+  const pctCell = (v) => (typeof v === "number" ? v.toFixed(2) + "%" : "—");
+  const rows = [
+    ["Price", (r) => (r.quote && r.quote.c ? "$" + fmtNum(r.quote.c, { maximumFractionDigits: 2 }) : "—")],
+    ["Change % (today)", (r) => (r.quote && typeof r.quote.dp === "number" ? `${r.quote.dp >= 0 ? "+" : ""}${fmtNum(r.quote.dp, { maximumFractionDigits: 2 })}%` : "—")],
+    ["Market Cap", (r) => (r.profile && r.profile.marketCapitalization ? fmtBig(r.profile.marketCapitalization * 1e6) : "—")],
+    ["P/E Ratio", (r) => (metricVal(r, "peTTM") ? fmtNum(metricVal(r, "peTTM"), { maximumFractionDigits: 2 }) : "—")],
+    ["EPS (TTM)", (r) => (metricVal(r, "epsTTM") ? "$" + fmtNum(metricVal(r, "epsTTM"), { maximumFractionDigits: 2 }) : "—")],
+    ["52W Range", (r) => {
+      const lo = metricVal(r, "52WeekLow"), hi = metricVal(r, "52WeekHigh");
+      return lo && hi ? `$${fmtNum(lo, { maximumFractionDigits: 2 })}–$${fmtNum(hi, { maximumFractionDigits: 2 })}` : "—";
+    }],
+    ["Gross Margin", (r) => pctCell(metricVal(r, "grossMarginTTM") ?? metricVal(r, "grossMarginAnnual"))],
+    ["Net Margin", (r) => pctCell(metricVal(r, "netProfitMarginTTM") ?? metricVal(r, "netProfitMarginAnnual"))],
+    ["Return on Equity", (r) => pctCell(metricVal(r, "roeTTM"))],
+  ];
+
+  const header = `<tr><th>Metric</th>${results.map((r) => `<th>${r.symbol}</th>`).join("")}</tr>`;
+  const body = rows
+    .map(([label, fn]) => `<tr><td>${label}</td>${results.map((r) => `<td>${fn(r)}</td>`).join("")}</tr>`)
+    .join("");
+  $("#compare-table-body").innerHTML = `<div class="compare-table-wrap"><table class="compare-table"><thead>${header}</thead><tbody>${body}</tbody></table></div>`;
+}
+
 // ---------- Loading a ticker ----------
 
 function loadTicker(symbol) {
+  exitCompareMode(); // selecting a single ticker implies leaving compare view
   emptyState.classList.add("hidden");
   stockView.classList.remove("hidden");
   setLoadingStates();

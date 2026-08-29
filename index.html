@@ -10,7 +10,7 @@
 <meta name="apple-mobile-web-app-capable" content="yes" />
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
 <meta name="apple-mobile-web-app-title" content="Screener" />
-<link rel="stylesheet" href="style.css?v=202608290005" />
+<link rel="stylesheet" href="style.css?v=202608290006" />
 <script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore-compat.js"></script>
 </head>
@@ -32,6 +32,7 @@
     </button>
     <div id="watchlist-panel" class="watchlist-panel hidden"></div>
   </div>
+  <button id="compare-toggle" class="watchlist-btn" title="Compare tickers side by side">⇄ Compare</button>
   <div id="usage-pill" class="usage-pill" title="Financial Modeling Prep free tier resets daily">0 / 250 today</div>
 </header>
 
@@ -99,9 +100,30 @@
     </section>
 
   </div>
+
+  <div id="compare-view" class="compare-view hidden">
+    <div class="compare-toolbar">
+      <div class="compare-chips" id="compare-chips"></div>
+      <input id="compare-input" type="text" autocomplete="off" spellcheck="false"
+        placeholder="Add a ticker to compare (up to 4)…" />
+      <div id="compare-search-results" class="search-results hidden"></div>
+    </div>
+
+    <section class="card" id="compare-chart-card">
+      <h2>Price Performance (% change)</h2>
+      <div id="compare-chart-body" class="chart-body">
+        <div class="muted-note">Add 2-4 tickers above to compare.</div>
+      </div>
+    </section>
+
+    <section class="card" id="compare-table-card">
+      <h2>Snapshot</h2>
+      <div id="compare-table-body" class="card-body"></div>
+    </section>
+  </div>
 </main>
 
-<script src="app.js?v=202608290011"></script>
+<script src="app.js?v=202608290012"></script>
 <script>if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js?v=202608291200');</script>
 </body>
 </html>
