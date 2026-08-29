@@ -120,7 +120,7 @@ function highlightSearchRow() {
 async function runSearch(q) {
   let items;
   try {
-    items = await api(`search?q=${encodeURIComponent(q)}`);
+    items = await finnhubApi(`search?q=${encodeURIComponent(q)}`);
   } catch {
     searchResults.innerHTML = `<div class="search-empty">Search failed — try again</div>`;
     searchResults.classList.remove("hidden");
@@ -139,7 +139,7 @@ async function runSearch(q) {
       <div class="search-row" data-symbol="${it.symbol}">
         <span class="search-row-symbol">${it.symbol}</span>
         <span class="search-row-name">${it.name || ""}</span>
-        <span class="search-row-exch">${it.exchange || ""}</span>
+        <span class="search-row-exch">${it.type === "Common Stock" ? "" : it.type || ""}</span>
       </div>`
     )
     .join("");

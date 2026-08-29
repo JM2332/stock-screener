@@ -127,24 +127,20 @@ exports.api = onRequest({ secrets: [FMP_API_KEY, FINNHUB_API_KEY], cors: false }
     }
 
     if (endpoint === "search") {
+      // Runs on Finnhub, not FMP — it has no daily cap (unlike FMP's 250/day,
+      // which search used to share with every other call and could go down
+      // with the rest of the app), and its one endpoint already matches by
+      // both symbol and company name, where FMP needed two separate calls.
       const q = req.query.q;
       if (!q) return res.status(400).json({ error: "missing q param" });
-      const encoded = encodeURIComponent(q);
-      // Symbol search covers tickers; fall back to name search only when it
-      // draws a blank, so a typical ticker lookup costs one FMP call, not two.
-      const symbolUrl = `${FMP_BASE}/search-symbol?query=${encoded}&limit=10&apikey=${FMP_API_KEY.value()}`;
-      const symbolRes = await fetch(symbolUrl);
-      const symbolBody = await symbolRes.json().catch(() => []);
-      if (!symbolRes.ok) {
-        return res.status(symbolRes.status).json(symbolBody);
+      const url = `${FINNHUB_BASE}/search?q=${encodeURIComponent(q)}&token=${FINNHUB_API_KEY.value()}`;
+      const upstream = await fetch(url);
+      const body = await upstream.json().catch(() => null);
+      if (!upstream.ok || !body) {
+        return res.status(upstream.status).json(body || { error: "search failed" });
       }
-      if (Array.isArray(symbolBody) && symbolBody.length) {
-        return res.status(200).json(symbolBody);
-      }
-      const nameUrl = `${FMP_BASE}/search-name?query=${encoded}&limit=10&apikey=${FMP_API_KEY.value()}`;
-      const nameRes = await fetch(nameUrl);
-      const nameBody = await nameRes.text();
-      return res.status(nameRes.status).set("Content-Type", "application/json").send(nameBody);
+      const results = (body.result || []).slice(0, 10).map((r) => ({ symbol: r.symbol, name: r.description, type: r.type }));
+      return res.status(200).json(results);
     }
 
     if (!ENDPOINTS[endpoint]) {
