@@ -12,6 +12,16 @@ let currentSearchItems = [];
 
 async function api(path) {
   bumpUsage();
+  return rawApi(path);
+}
+
+// News runs through Finnhub, not FMP — it has its own, much more generous
+// quota (60/min), so it deliberately doesn't touch the FMP usage pill.
+async function newsApi(path) {
+  return rawApi(path);
+}
+
+async function rawApi(path) {
   const res = await fetch(`${API_BASE}/${path}`);
   const body = await res.json().catch(() => null);
   if (!res.ok) {
@@ -166,7 +176,7 @@ function loadTicker(symbol) {
   loadFairValue(symbol, quotePromise);
   loadRatings(symbol);
   loadFinancials(symbol);
-  showNewsUnavailable();
+  loadNews(symbol);
 }
 
 function setLoadingStates() {
@@ -447,12 +457,35 @@ async function renderFinTab() {
 }
 
 // ---------- News ----------
-// FMP restricted every news endpoint (symbol-specific and even the
-// unfiltered "latest news" feed) to paid plans as of this build — confirmed
-// via direct API calls, all returning 402. No point spending a proxy/quota
-// call on something that can never succeed on the free tier, so this is a
-// static message rather than a fetch.
+// FMP restricted every news endpoint to paid plans, so this runs through
+// Finnhub's free company-news endpoint instead (proxied the same way, key
+// hidden server-side) — see newsApi() above for why it skips the FMP pill.
 
-function showNewsUnavailable() {
-  $("#news-body").innerHTML = `<div class="muted-note">News requires a paid Financial Modeling Prep plan — their free tier no longer includes any news endpoint (confirmed: symbol news and the general feed both return "Restricted Endpoint"). Ask to add a separate free news source, or upgrade FMP, if this matters to you.</div>`;
+async function loadNews(symbol) {
+  const el = $("#news-body");
+  try {
+    const items = await newsApi(`news/${symbol}`);
+    if (!Array.isArray(items) || !items.length) {
+      el.innerHTML = `<div class="muted-note">No recent news found in the last 14 days.</div>`;
+      return;
+    }
+    el.innerHTML = items
+      .slice(0, 12)
+      .map((it) => {
+        const date = it.datetime ? new Date(it.datetime * 1000).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" }) : "";
+        return `
+        <a class="news-item" href="${it.url}" target="_blank" rel="noopener noreferrer">
+          ${it.image ? `<img class="news-thumb" src="${it.image}" loading="lazy" onerror="this.remove()" />` : ""}
+          <div>
+            <div class="news-title">${it.headline || ""}</div>
+            <div class="news-meta">${it.source || ""} · ${date}</div>
+          </div>
+        </a>`;
+      })
+      .join("");
+  } catch (err) {
+    el.innerHTML = err.status === 402 || err.status === 403
+      ? `<div class="muted-note">News requires a paid Finnhub plan.</div>`
+      : `<div class="error-note">Couldn't load news.</div>`;
+  }
 }

@@ -2,7 +2,9 @@ const { onRequest } = require("firebase-functions/v2/https");
 const { defineSecret } = require("firebase-functions/params");
 
 const FMP_API_KEY = defineSecret("FMP_API_KEY");
+const FINNHUB_API_KEY = defineSecret("FINNHUB_API_KEY");
 const FMP_BASE = "https://financialmodelingprep.com/stable";
+const FINNHUB_BASE = "https://finnhub.io/api/v1";
 
 // Whitelisted endpoint templates against FMP's current "stable" API.
 // {ticker} is substituted from the request path; everything else is fixed
@@ -44,7 +46,7 @@ async function fetchFmp(path, res) {
   res.status(upstream.status).set("Content-Type", "application/json").send(body);
 }
 
-exports.api = onRequest({ secrets: [FMP_API_KEY], cors: false }, async (req, res) => {
+exports.api = onRequest({ secrets: [FMP_API_KEY, FINNHUB_API_KEY], cors: false }, async (req, res) => {
   setCors(req, res);
   if (req.method === "OPTIONS") {
     res.status(204).send("");
@@ -55,6 +57,19 @@ exports.api = onRequest({ secrets: [FMP_API_KEY], cors: false }, async (req, res
   const [endpoint, ticker] = parts;
 
   try {
+    if (endpoint === "news") {
+      if (!ticker || !/^[A-Za-z0-9.\-]{1,10}$/.test(ticker)) {
+        return res.status(400).json({ error: "invalid or missing ticker" });
+      }
+      const to = new Date();
+      const from = new Date(to.getTime() - 14 * 24 * 60 * 60 * 1000);
+      const iso = (d) => d.toISOString().slice(0, 10);
+      const url = `${FINNHUB_BASE}/company-news?symbol=${ticker.toUpperCase()}&from=${iso(from)}&to=${iso(to)}&token=${FINNHUB_API_KEY.value()}`;
+      const upstream = await fetch(url);
+      const body = await upstream.text();
+      return res.status(upstream.status).set("Content-Type", "application/json").send(body);
+    }
+
     if (endpoint === "search") {
       const q = req.query.q;
       if (!q) return res.status(400).json({ error: "missing q param" });
