@@ -168,13 +168,16 @@ function loadTicker(symbol) {
   activeFinTab = "balance";
   [...$("#fin-tabs").children].forEach((b) => b.classList.toggle("active", b.dataset.tab === "balance"));
 
-  // Shared once so loadHero and loadFairValue don't each pay for their own
-  // quote/AAPL call — they both just await this same in-flight request.
+  // Shared once so the sections that need the same underlying data (quote,
+  // profile, analyst price target) don't each pay for their own call — they
+  // all just await these same in-flight requests.
   const quotePromise = api(`quote/${symbol}`);
+  const profilePromise = api(`profile/${symbol}`);
+  const priceTargetPromise = api(`price-target/${symbol}`);
 
-  loadHero(symbol, quotePromise);
-  loadFairValue(symbol, quotePromise);
-  loadRatings(symbol);
+  loadHero(symbol, quotePromise, profilePromise);
+  loadFairValue(symbol, quotePromise, profilePromise, priceTargetPromise);
+  loadRatings(symbol, priceTargetPromise);
   loadFinancials(symbol);
   loadNews(symbol);
 }
@@ -215,11 +218,11 @@ function fmtPct(n) {
 
 // ---------- Hero ----------
 
-async function loadHero(symbol, quotePromise) {
+async function loadHero(symbol, quotePromise, profilePromise) {
   try {
     const [quoteArr, profileArr, ratiosRes, incomeRes] = await Promise.all([
       quotePromise,
-      api(`profile/${symbol}`),
+      profilePromise,
       fetchFinTab("ratios", symbol),
       fetchFinTab("income", symbol),
     ]);
@@ -264,40 +267,118 @@ async function loadHero(symbol, quotePromise) {
   }
 }
 
-// ---------- Fair value (DCF) ----------
+// ---------- Fair value (multiple independent methods) ----------
+// A single DCF read can be wildly off for growth stocks with thin current
+// earnings (TSLA has read >1000% "overvalued" on DCF alone) since it's built
+// entirely around projected cash flows. Showing several differently-grounded
+// methods side by side — cash-flow, accounting-value, market-relative, and
+// street-sentiment — gives a fuller picture than trusting any one number.
 
-async function loadFairValue(symbol, quotePromise) {
+function verdictFor(diffPct) {
+  if (diffPct > 8) return { verdict: "Overvalued", cls: "over" };
+  if (diffPct < -8) return { verdict: "Undervalued", cls: "under" };
+  return { verdict: "Fair", cls: "fair" };
+}
+
+async function loadFairValue(symbol, quotePromise, profilePromise, priceTargetPromise) {
   const el = $("#fv-body");
   try {
-    const [dcfArr, quoteArr] = await Promise.all([api(`dcf/${symbol}`), quotePromise]);
-    const dcf = dcfArr && dcfArr[0];
-    const price = quoteArr && quoteArr[0] && quoteArr[0].price;
-    if (!dcf || dcf.dcf === undefined || price === undefined) {
+    const [quoteRes, profileRes, dcfRes, incomeRes, kmRes, ptRes] = await Promise.allSettled([
+      quotePromise,
+      profilePromise,
+      api(`dcf/${symbol}`),
+      fetchFinTab("income", symbol),
+      api(`key-metrics/${symbol}`),
+      priceTargetPromise,
+    ]);
+
+    const price = quoteRes.status === "fulfilled" && quoteRes.value[0] && quoteRes.value[0].price;
+    if (!price) {
       el.innerHTML = `<div class="muted-note">Fair value data isn't available for this ticker.</div>`;
       return;
     }
-    const fairValue = dcf.dcf;
-    const diffPct = ((price - fairValue) / fairValue) * 100;
-    let verdict, cls;
-    if (diffPct > 8) {
-      verdict = "Potentially Overvalued";
-      cls = "over";
-    } else if (diffPct < -8) {
-      verdict = "Potentially Undervalued";
-      cls = "under";
-    } else {
-      verdict = "Fairly Valued";
-      cls = "fair";
+
+    const methods = [];
+
+    if (dcfRes.status === "fulfilled" && dcfRes.value && dcfRes.value[0] && dcfRes.value[0].dcf) {
+      methods.push({
+        name: "DCF",
+        value: dcfRes.value[0].dcf,
+        note: "Projects future cash flows and discounts to present value. Can read as extreme for high-growth, low-current-earnings companies.",
+      });
     }
+
+    if (kmRes.status === "fulfilled" && kmRes.value && kmRes.value[0] && kmRes.value[0].grahamNumber) {
+      methods.push({
+        name: "Graham Number",
+        value: kmRes.value[0].grahamNumber,
+        note: "Conservative formula from earnings + book value. Tends to read low for asset-light or high-growth companies.",
+      });
+    }
+
+    const inc = incomeRes.status === "fulfilled" && !incomeRes.value.error && incomeRes.value.data && incomeRes.value.data[0];
+    const eps = inc && inc.eps;
+    const profile = profileRes.status === "fulfilled" && profileRes.value[0];
+    const sector = profile && profile.sector;
+    const exchange = quoteRes.status === "fulfilled" && quoteRes.value[0] && quoteRes.value[0].exchange;
+    if (eps && sector && exchange) {
+      try {
+        const sectorPe = await api(`sector-pe?sector=${encodeURIComponent(sector)}&exchange=${encodeURIComponent(exchange)}`);
+        if (sectorPe && sectorPe.pe) {
+          methods.push({
+            name: `Sector P/E (${sector})`,
+            value: eps * sectorPe.pe,
+            note: `EPS × ${sector} sector average P/E (${sectorPe.pe.toFixed(1)}×) on ${exchange}. Reflects what similar companies currently trade at, not intrinsic worth.`,
+          });
+        }
+      } catch {
+        // sector-pe is a nice-to-have method; skip silently if it fails
+      }
+    }
+
+    if (ptRes.status === "fulfilled" && ptRes.value && ptRes.value[0] && ptRes.value[0].targetConsensus) {
+      methods.push({
+        name: "Analyst Price Target",
+        value: ptRes.value[0].targetConsensus,
+        note: "Consensus of Wall Street 12-month price targets. Forward-looking, but reflects sentiment as much as fundamentals.",
+      });
+    }
+
+    if (!methods.length) {
+      el.innerHTML = `<div class="muted-note">Fair value data isn't available for this ticker.</div>`;
+      return;
+    }
+
+    const withDiff = methods.map((m) => ({ ...m, diffPct: ((price - m.value) / m.value) * 100 }));
+    const verdicts = withDiff.map((m) => verdictFor(m.diffPct).verdict);
+    const agreeCount = Math.max(...["Overvalued", "Undervalued", "Fair"].map((v) => verdicts.filter((x) => x === v).length));
+    const majority = verdicts.find((v) => verdicts.filter((x) => x === v).length === agreeCount);
+    const summaryLine = agreeCount === methods.length
+      ? `All ${methods.length} method${methods.length > 1 ? "s" : ""} agree: potentially ${majority.toLowerCase()}`
+      : `Mixed signal — ${agreeCount} of ${methods.length} methods lean ${majority.toLowerCase()}`;
+    const headlineCls = agreeCount === methods.length ? verdictFor(withDiff[0].diffPct).cls : "fair";
+
+    const rows = withDiff
+      .map((m) => {
+        const { verdict, cls } = verdictFor(m.diffPct);
+        return `
+        <div class="fv-method-row">
+          <div class="fv-method-top">
+            <span class="fv-method-name">${m.name}</span>
+            <span class="fv-method-value">$${fmtNum(m.value, { maximumFractionDigits: 2 })}</span>
+            <span class="fv-method-diff ${cls}">${m.diffPct > 0 ? "+" : ""}${m.diffPct.toFixed(1)}%</span>
+          </div>
+          <div class="fv-method-note">${m.note}</div>
+        </div>`;
+      })
+      .join("");
+
     el.innerHTML = `
       <div class="fv-details">
-        <div class="fv-verdict ${cls}">${verdict}</div>
-        <div class="fv-sub">
-          DCF fair value estimate: <strong>$${fmtNum(fairValue, { maximumFractionDigits: 2 })}</strong><br/>
-          Current price: <strong>$${fmtNum(price, { maximumFractionDigits: 2 })}</strong> (${diffPct > 0 ? "+" : ""}${diffPct.toFixed(1)}% vs fair value)
-        </div>
-        <div class="fv-note">Based on a discounted cash flow model. One estimate among many — treat as a starting point, not a target price.</div>
-      </div>`;
+        <div class="fv-verdict ${headlineCls}">${summaryLine}</div>
+        <div class="fv-sub">Current price: <strong>$${fmtNum(price, { maximumFractionDigits: 2 })}</strong> — compared against ${methods.length} independent estimate${methods.length > 1 ? "s" : ""} below.</div>
+      </div>
+      <div class="fv-methods">${rows}</div>`;
   } catch (err) {
     el.innerHTML = err.status === 403 || err.status === 402
       ? `<div class="muted-note">Fair value requires a higher Financial Modeling Prep plan.</div>`
@@ -307,12 +388,12 @@ async function loadFairValue(symbol, quotePromise) {
 
 // ---------- Ratings & estimates ----------
 
-async function loadRatings(symbol) {
+async function loadRatings(symbol, priceTargetPromise) {
   const el = $("#ratings-body");
   const results = await Promise.allSettled([
     api(`grades-consensus/${symbol}`),
     api(`ratings-snapshot/${symbol}`),
-    api(`price-target/${symbol}`),
+    priceTargetPromise,
     api(`grades/${symbol}`),
     api(`estimates/${symbol}`),
   ]);
@@ -405,13 +486,15 @@ async function loadFinancials(symbol) {
   renderFinTab();
 }
 
-async function fetchFinTab(tab, symbol) {
-  if (finCache[tab]) return finCache[tab];
-  try {
-    const data = await api(`${FIN_ENDPOINTS[tab].path}/${symbol}`);
-    finCache[tab] = { data, error: null };
-  } catch (err) {
-    finCache[tab] = { data: null, error: err };
+function fetchFinTab(tab, symbol) {
+  // Caches the in-flight promise itself, synchronously, not just the
+  // resolved result — otherwise two callers racing before either's first
+  // await (e.g. loadHero and loadFairValue both wanting "income") would
+  // each see an empty cache slot and fire duplicate requests.
+  if (!finCache[tab]) {
+    finCache[tab] = api(`${FIN_ENDPOINTS[tab].path}/${symbol}`)
+      .then((data) => ({ data, error: null }))
+      .catch((err) => ({ data: null, error: err }));
   }
   return finCache[tab];
 }

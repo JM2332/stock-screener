@@ -22,7 +22,15 @@ const ENDPOINTS = {
   "income-statement": (t) => `/income-statement?symbol=${t}&limit=5`,
   "cash-flow": (t) => `/cash-flow-statement?symbol=${t}&limit=5`,
   ratios: (t) => `/ratios?symbol=${t}&limit=5`,
+  "key-metrics": (t) => `/key-metrics?symbol=${t}&limit=1`,
 };
+
+// sector-pe-snapshot is keyed by exchange+date, not by ticker, so it's worth
+// caching across requests within a warm instance — many tickers share an
+// exchange, and the value only changes once a day. Keeps this fair-value
+// method from burning extra FMP quota on every ticker search.
+const sectorPeCache = new Map(); // exchange -> { fetchedAt, rows }
+const SECTOR_PE_TTL_MS = 60 * 60 * 1000;
 
 const ALLOWED_ORIGINS = new Set([
   "https://jm2332.github.io",
@@ -68,6 +76,33 @@ exports.api = onRequest({ secrets: [FMP_API_KEY, FINNHUB_API_KEY], cors: false }
       const upstream = await fetch(url);
       const body = await upstream.text();
       return res.status(upstream.status).set("Content-Type", "application/json").send(body);
+    }
+
+    if (endpoint === "sector-pe") {
+      const sector = req.query.sector;
+      const exchange = req.query.exchange;
+      if (!sector || !exchange) return res.status(400).json({ error: "missing sector or exchange param" });
+
+      const cached = sectorPeCache.get(exchange);
+      let rows = cached && Date.now() - cached.fetchedAt < SECTOR_PE_TTL_MS ? cached.rows : null;
+
+      if (!rows) {
+        // Free tier only has a short recent window and weekends/holidays
+        // have no snapshot, so walk back a few days for the last trading day.
+        for (let i = 0; i <= 3 && !rows; i++) {
+          const d = new Date(Date.now() - i * 24 * 60 * 60 * 1000);
+          const iso = d.toISOString().slice(0, 10);
+          const url = `${FMP_BASE}/sector-pe-snapshot?date=${iso}&exchange=${encodeURIComponent(exchange)}&apikey=${FMP_API_KEY.value()}`;
+          const upstream = await fetch(url);
+          if (!upstream.ok) continue;
+          const body = await upstream.json().catch(() => []);
+          if (Array.isArray(body) && body.length) rows = body;
+        }
+        if (rows) sectorPeCache.set(exchange, { fetchedAt: Date.now(), rows });
+      }
+
+      const match = rows && rows.find((r) => r.sector === sector);
+      return res.status(200).json(match || null);
     }
 
     if (endpoint === "search") {
