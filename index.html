@@ -10,7 +10,7 @@
 <meta name="apple-mobile-web-app-capable" content="yes" />
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
 <meta name="apple-mobile-web-app-title" content="Screener" />
-<link rel="stylesheet" href="style.css?v=202608290003" />
+<link rel="stylesheet" href="style.css?v=202608290004" />
 </head>
 <body>
 
@@ -49,6 +49,19 @@
       <div class="hero-stats" id="s-stats"></div>
     </section>
 
+    <section class="card" id="chart-card">
+      <div class="chart-header">
+        <h2>Price History</h2>
+        <div class="tabs" id="range-tabs">
+          <button class="tab-btn" data-range="1m">1M</button>
+          <button class="tab-btn" data-range="6m">6M</button>
+          <button class="tab-btn active" data-range="1y">1Y</button>
+          <button class="tab-btn" data-range="5y">5Y</button>
+        </div>
+      </div>
+      <div id="chart-body" class="chart-body">Loading…</div>
+    </section>
+
     <section class="card fair-value-card" id="fv-card">
       <h2>Fair Value</h2>
       <div id="fv-body" class="fv-body">Loading…</div>
@@ -80,7 +93,7 @@
   </div>
 </main>
 
-<script src="app.js?v=202608290009"></script>
+<script src="app.js?v=202608290010"></script>
 <script>if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js?v=202608291200');</script>
 </body>
 </html>

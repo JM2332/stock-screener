@@ -184,6 +184,17 @@ body {
 .stat-label { font-size: 11px; color: var(--text-faint); text-transform: uppercase; letter-spacing: 0.04em; }
 .stat-value { font-size: 14.5px; font-weight: 600; font-variant-numeric: tabular-nums; }
 
+/* Price chart */
+.chart-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px; }
+.chart-header h2 { margin: 0; }
+.chart-summary { display: flex; align-items: baseline; gap: 12px; margin-bottom: 10px; }
+.chart-price { font-size: 20px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.chart-change { font-size: 13px; font-weight: 600; }
+.chart-change.up { color: var(--green); }
+.chart-change.down { color: var(--red); }
+.price-chart { width: 100%; height: 180px; display: block; }
+.chart-dates { display: flex; justify-content: space-between; font-size: 11px; color: var(--text-faint); margin-top: 6px; }
+
 /* Fair value */
 .fv-body { display: flex; flex-direction: column; }
 .fv-details { min-width: 0; }

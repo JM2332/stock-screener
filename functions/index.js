@@ -258,6 +258,22 @@ exports.api = onRequest({ secrets: [FMP_API_KEY, FINNHUB_API_KEY], cors: false }
       return res.status(200).json({ balanceSheet, incomeStatement, cashFlow });
     }
 
+    if (endpoint === "history") {
+      // Price charts — Finnhub's candle endpoint is paid-only on the free
+      // tier (confirmed via direct test, 403), but FMP's free tier does
+      // include EOD historical price data, so this stays on FMP (counted
+      // against the 250/day quota, ~1 call per range switch).
+      if (!ticker || !/^[A-Za-z0-9.\-]{1,10}$/.test(ticker)) {
+        return res.status(400).json({ error: "invalid or missing ticker" });
+      }
+      const days = { "1m": 30, "6m": 182, "1y": 365, "5y": 365 * 5 }[req.query.range] || 365;
+      const to = new Date();
+      const from = new Date(to.getTime() - days * 24 * 60 * 60 * 1000);
+      const iso = (d) => d.toISOString().slice(0, 10);
+      await fetchFmp(`/historical-price-eod/light?symbol=${ticker.toUpperCase()}&from=${iso(from)}&to=${iso(to)}`, res);
+      return;
+    }
+
     if (endpoint === "search") {
       // Runs on Finnhub, not FMP — it has no daily cap (unlike FMP's 250/day,
       // which search used to share with every other call and could go down

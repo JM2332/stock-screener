@@ -169,6 +169,9 @@ function loadTicker(symbol) {
   finCache = {};
   activeFinTab = "balance";
   [...$("#fin-tabs").children].forEach((b) => b.classList.toggle("active", b.dataset.tab === "balance"));
+  chartCache = {};
+  activeRange = "1y";
+  [...$("#range-tabs").children].forEach((b) => b.classList.toggle("active", b.dataset.range === "1y"));
 
   // Finnhub + SEC EDGAR "core" data — quote/profile/basic ratios/
   // recommendation trends/financial statements — works for effectively any
@@ -188,6 +191,7 @@ function loadTicker(symbol) {
   const priceTargetPromise = api(`price-target/${symbol}`);
 
   loadHero(symbol, fhQuotePromise, fhProfilePromise, fhMetricsPromise, fmpQuotePromise);
+  loadChart(symbol);
   loadFairValue(symbol, fhQuotePromise, fhMetricsPromise, fmpQuotePromise, fmpProfilePromise, priceTargetPromise);
   loadRatings(symbol, fhRecPromise, priceTargetPromise);
   loadFinancials(symbol, secPromise, fhMetricsPromise);
@@ -203,6 +207,7 @@ function setLoadingStates() {
   $("#s-change").textContent = "";
   $("#s-change").className = "hero-change";
   $("#s-stats").innerHTML = "";
+  $("#chart-body").innerHTML = `<div class="spinner-line">Loading…</div>`;
   $("#fv-body").innerHTML = `<div class="spinner-line">Loading…</div>`;
   $("#ratings-body").innerHTML = `<div class="spinner-line">Loading…</div>`;
   $("#fin-body").innerHTML = `<div class="spinner-line">Loading…</div>`;
@@ -295,6 +300,93 @@ async function loadHero(symbol, fhQuotePromise, fhProfilePromise, fhMetricsPromi
       ? "Not a supported market — this tool covers US-listed stocks only"
       : "Couldn't load this ticker";
   }
+}
+
+// ---------- Price chart ----------
+// Finnhub's candle endpoint is paid-only on the free tier, so this stays on
+// FMP (counted against the 250/day quota — roughly 1 call per range viewed,
+// cached per range so switching back to an already-viewed range is free).
+
+let currentChartSymbol = null;
+let activeRange = "1y";
+let chartCache = {};
+
+$("#range-tabs").addEventListener("click", (e) => {
+  const btn = e.target.closest(".tab-btn");
+  if (!btn) return;
+  activeRange = btn.dataset.range;
+  [...$("#range-tabs").children].forEach((b) => b.classList.toggle("active", b === btn));
+  renderChart();
+});
+
+async function loadChart(symbol) {
+  currentChartSymbol = symbol;
+  await fetchChartRange(activeRange);
+  renderChart();
+}
+
+function fetchChartRange(range) {
+  if (!chartCache[range]) {
+    chartCache[range] = api(`history/${currentChartSymbol}?range=${range}`)
+      .then((data) => ({ data, error: null }))
+      .catch((err) => ({ data: null, error: err }));
+  }
+  return chartCache[range];
+}
+
+async function renderChart() {
+  const el = $("#chart-body");
+  const symbol = currentChartSymbol;
+  const range = activeRange;
+  el.innerHTML = `<div class="spinner-line">Loading…</div>`;
+  const result = await fetchChartRange(range);
+  if (symbol !== currentChartSymbol || range !== activeRange) return; // stale, ticker/range changed since
+
+  if (result.error || !Array.isArray(result.data) || result.data.length < 2) {
+    let msg = "Not enough price history available for this ticker.";
+    if (result.error && result.error.status === 429) msg = fmpFailureNote("rate-limited");
+    else if (result.error && (result.error.status === 402 || result.error.status === 403)) {
+      msg = "Price history isn't available for this ticker on the free FMP plan.";
+    }
+    el.innerHTML = `<div class="muted-note">${msg}</div>`;
+    return;
+  }
+
+  el.innerHTML = buildChartSvg(result.data);
+}
+
+function buildChartSvg(data) {
+  const points = data.slice().sort((a, b) => (a.date < b.date ? -1 : 1));
+  const prices = points.map((p) => p.price);
+  const min = Math.min(...prices);
+  const max = Math.max(...prices);
+  const first = prices[0];
+  const last = prices[prices.length - 1];
+  const changePct = ((last - first) / first) * 100;
+  const up = changePct >= 0;
+  const colorVar = up ? "var(--green)" : "var(--red)";
+
+  const W = 700, H = 200, padX = 4, padY = 10;
+  const spanRange = max - min || 1;
+  const stepX = points.length > 1 ? (W - padX * 2) / (points.length - 1) : 0;
+  const coords = prices.map((p, i) => {
+    const x = padX + i * stepX;
+    const y = padY + (H - padY * 2) * (1 - (p - min) / spanRange);
+    return [x, y];
+  });
+  const linePath = coords.map(([x, y], i) => `${i === 0 ? "M" : "L"}${x.toFixed(2)},${y.toFixed(2)}`).join(" ");
+  const areaPath = `${linePath} L${coords[coords.length - 1][0].toFixed(2)},${H - padY} L${coords[0][0].toFixed(2)},${H - padY} Z`;
+
+  return `
+    <div class="chart-summary">
+      <span class="chart-price">$${fmtNum(last, { maximumFractionDigits: 2 })}</span>
+      <span class="chart-change ${up ? "up" : "down"}">${up ? "+" : ""}${changePct.toFixed(2)}% over period</span>
+    </div>
+    <svg viewBox="0 0 ${W} ${H}" class="price-chart" preserveAspectRatio="none">
+      <path d="${areaPath}" style="fill:${colorVar};opacity:0.1;stroke:none"></path>
+      <path d="${linePath}" style="fill:none;stroke:${colorVar};stroke-width:2"></path>
+    </svg>
+    <div class="chart-dates"><span>${points[0].date}</span><span>${points[points.length - 1].date}</span></div>`;
 }
 
 // ---------- Fair value (multiple independent methods) ----------
