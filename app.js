@@ -15,12 +15,12 @@ async function api(path) {
   return rawApi(path);
 }
 
-// Everything Finnhub-backed (news, and now quote/profile/basic ratios/
-// recommendation trends) runs through here instead of api() — Finnhub has
-// its own, much more generous quota (no daily cap, ~60/min) and covers
-// tickers FMP's free tier blocks outright, so these calls deliberately don't
-// touch the FMP usage pill.
-async function finnhubApi(path) {
+// Everything sourced from Finnhub or SEC EDGAR (news, quote/profile/basic
+// ratios/recommendation trends, financial statements, search) runs through
+// here instead of api() — both are free and effectively uncapped, and
+// Finnhub covers tickers FMP's free tier blocks outright, so these calls
+// deliberately don't touch the FMP usage pill.
+async function freeApi(path) {
   return rawApi(path);
 }
 
@@ -120,7 +120,7 @@ function highlightSearchRow() {
 async function runSearch(q) {
   let items;
   try {
-    items = await finnhubApi(`search?q=${encodeURIComponent(q)}`);
+    items = await freeApi(`search?q=${encodeURIComponent(q)}`);
   } catch {
     searchResults.innerHTML = `<div class="search-empty">Search failed — try again</div>`;
     searchResults.classList.remove("hidden");
@@ -163,25 +163,25 @@ function loadTicker(symbol) {
   setLoadingStates();
 
   // Reset per-ticker financials state synchronously, before any async loader
-  // below gets a chance to run — otherwise loadHero's own prefetch (it reuses
-  // fetchFinTab for ratios/income so the Financials tabs don't re-fetch) could
-  // read or write into the previous ticker's cache.
+  // below gets a chance to run — otherwise a Financials tab click landing
+  // mid-load could read or write into the previous ticker's cache.
   currentSymbol = symbol;
   finCache = {};
   activeFinTab = "balance";
   [...$("#fin-tabs").children].forEach((b) => b.classList.toggle("active", b.dataset.tab === "balance"));
 
-  // Finnhub "core" data — quote/profile/basic ratios/recommendation trends —
-  // works for effectively any US-listed ticker on the free tier, no daily
-  // cap. This is what actually carries the page now; FMP fills in the
-  // extras it uniquely still offers free (DCF, Graham Number, sector P/E,
-  // price targets, forward estimates, clean financial statements) on a
-  // best-effort basis that can fail outright for a ticker FMP doesn't cover
-  // without taking the rest of the page down with it.
-  const fhQuotePromise = finnhubApi(`fh-quote/${symbol}`);
-  const fhProfilePromise = finnhubApi(`fh-profile/${symbol}`);
-  const fhMetricsPromise = finnhubApi(`fh-metrics/${symbol}`);
-  const fhRecPromise = finnhubApi(`fh-recommendation/${symbol}`);
+  // Finnhub + SEC EDGAR "core" data — quote/profile/basic ratios/
+  // recommendation trends/financial statements — works for effectively any
+  // US-listed ticker, free and with no daily cap. This is what actually
+  // carries the page now; FMP fills in the extras that genuinely have no
+  // free unlimited alternative (sector P/E, price targets, forward
+  // estimates) on a best-effort basis that can fail outright for a ticker
+  // FMP doesn't cover without taking the rest of the page down with it.
+  const fhQuotePromise = freeApi(`fh-quote/${symbol}`);
+  const fhProfilePromise = freeApi(`fh-profile/${symbol}`);
+  const fhMetricsPromise = freeApi(`fh-metrics/${symbol}`);
+  const fhRecPromise = freeApi(`fh-recommendation/${symbol}`);
+  const secPromise = freeApi(`sec-financials/${symbol}`);
 
   const fmpQuotePromise = api(`quote/${symbol}`);
   const fmpProfilePromise = api(`profile/${symbol}`);
@@ -190,7 +190,7 @@ function loadTicker(symbol) {
   loadHero(symbol, fhQuotePromise, fhProfilePromise, fhMetricsPromise, fmpQuotePromise);
   loadFairValue(symbol, fhQuotePromise, fhMetricsPromise, fmpQuotePromise, fmpProfilePromise, priceTargetPromise);
   loadRatings(symbol, fhRecPromise, priceTargetPromise);
-  loadFinancials(symbol);
+  loadFinancials(symbol, secPromise, fhMetricsPromise);
   loadNews(symbol);
 }
 
@@ -221,11 +221,6 @@ function fmtBig(n) {
   if (abs >= 1e9) return (n / 1e9).toFixed(2) + "B";
   if (abs >= 1e6) return (n / 1e6).toFixed(2) + "M";
   return fmtNum(n);
-}
-
-function fmtPct(n) {
-  if (n === null || n === undefined || Number.isNaN(n)) return "—";
-  return (n * (Math.abs(n) < 1.5 ? 100 : 1)).toFixed(2) + "%";
 }
 
 // Finnhub's profile exchange field is a messy long form ("NASDAQ NMS - GLOBAL
@@ -309,6 +304,42 @@ function verdictFor(diffPct) {
   return { verdict: "Fair", cls: "fair" };
 }
 
+// Graham Number and a simple 2-stage DCF, both computed from Finnhub's
+// basic-financials (free tier, no daily cap) instead of FMP's paid-quota'd
+// versions — these were the two fair-value methods most likely to be
+// unavailable right when someone hits FMP's 250/day limit, so moving them
+// off FMP entirely means Fair Value now shows at least two methods for
+// *any* ticker, regardless of FMP's quota state.
+
+function computeGrahamNumber(m) {
+  if (!m || !(m.epsTTM > 0) || !(m.bookValuePerShareAnnual > 0)) return null;
+  return Math.sqrt(22.5 * m.epsTTM * m.bookValuePerShareAnnual);
+}
+
+// 2-stage DCF: 5 years of free cash flow growing at a capped historical
+// rate, discounted at a CAPM-derived rate, plus a discounted terminal value
+// at a conservative 2.5% long-run growth. The growth cap (-5% to +15%/yr) is
+// deliberately conservative — uncapped growth extrapolation is exactly what
+// made FMP's own DCF read as wildly unreliable for volatile growth stocks.
+function computeDiyDcf(price, m) {
+  if (!m || !(m.pfcfShareTTM > 0)) return null;
+  const fcfps = price / m.pfcfShareTTM;
+  if (!(fcfps > 0) || typeof m.focfCagr5Y !== "number" || Number.isNaN(m.focfCagr5Y)) return null;
+  const g1 = Math.max(-0.05, Math.min(0.15, m.focfCagr5Y / 100));
+  const beta = typeof m.beta === "number" && m.beta > 0 ? m.beta : 1;
+  const r = 0.045 + Math.max(0.5, Math.min(2, beta)) * 0.05; // CAPM: risk-free + beta × equity risk premium
+  const g2 = 0.025;
+  if (r <= g2) return null;
+  let pv = 0;
+  let fcf = fcfps;
+  for (let t = 1; t <= 5; t++) {
+    fcf *= 1 + g1;
+    pv += fcf / Math.pow(1 + r, t);
+  }
+  pv += (fcf * (1 + g2)) / (r - g2) / Math.pow(1 + r, 5);
+  return { value: pv, growthPct: g1 * 100, discountPct: r * 100 };
+}
+
 // Distinguishes "FMP doesn't cover this ticker" (402/403, permanent for that
 // ticker) from "today's 250-call quota is used up" (429, temporary and
 // nothing to do with which ticker this is) — very different messages for
@@ -329,13 +360,11 @@ function fmpFailureNote(kind, fallback) {
 async function loadFairValue(symbol, fhQuotePromise, fhMetricsPromise, fmpQuotePromise, fmpProfilePromise, priceTargetPromise) {
   const el = $("#fv-body");
   try {
-    const [fhQuoteRes, fhMetricsRes, fmpQuoteRes, fmpProfileRes, dcfRes, kmRes, ptRes] = await Promise.allSettled([
+    const [fhQuoteRes, fhMetricsRes, fmpQuoteRes, fmpProfileRes, ptRes] = await Promise.allSettled([
       fhQuotePromise,
       fhMetricsPromise,
       fmpQuotePromise,
       fmpProfilePromise,
-      api(`dcf/${symbol}`),
-      api(`key-metrics/${symbol}`),
       priceTargetPromise,
     ]);
 
@@ -349,27 +378,30 @@ async function loadFairValue(symbol, fhQuotePromise, fhMetricsPromise, fmpQuoteP
     }
 
     const methods = [];
+    const m = fhMetricsRes.status === "fulfilled" && fhMetricsRes.value && fhMetricsRes.value.metric;
 
-    if (dcfRes.status === "fulfilled" && dcfRes.value && dcfRes.value[0] && dcfRes.value[0].dcf) {
+    const dcf = computeDiyDcf(price, m);
+    if (dcf) {
       methods.push({
         name: "DCF",
-        value: dcfRes.value[0].dcf,
-        note: "Projects future cash flows and discounts to present value. Can read as extreme for high-growth, low-current-earnings companies.",
+        value: dcf.value,
+        note: `Our own 2-stage DCF from Finnhub's cash-flow data: ${dcf.growthPct.toFixed(1)}%/yr growth (capped -5% to +15%) for 5 years, ${dcf.discountPct.toFixed(1)}% discount rate (CAPM), 2.5% terminal growth. Simplified — treat as a starting point, not a target price.`,
       });
     }
 
-    if (kmRes.status === "fulfilled" && kmRes.value && kmRes.value[0] && kmRes.value[0].grahamNumber) {
+    const graham = computeGrahamNumber(m);
+    if (graham) {
       methods.push({
         name: "Graham Number",
-        value: kmRes.value[0].grahamNumber,
+        value: graham,
         note: "Conservative formula from earnings + book value. Tends to read low for asset-light or high-growth companies.",
       });
     }
 
-    // EPS comes from Finnhub (always available); sector + exchange still
-    // need FMP's own taxonomy since sector-pe-snapshot's sector names have
-    // to match FMP's categories exactly — Finnhub's industry strings don't.
-    const eps = fhMetricsRes.status === "fulfilled" && fhMetricsRes.value && fhMetricsRes.value.metric && fhMetricsRes.value.metric.epsTTM;
+    // Sector P/E still needs FMP's own sector/exchange taxonomy since
+    // sector-pe-snapshot's category names have to match FMP's exactly —
+    // Finnhub's industry strings don't line up with them.
+    const eps = m && m.epsTTM;
     const profile = fmpProfileRes.status === "fulfilled" && fmpProfileRes.value[0];
     const sector = profile && profile.sector;
     const exchange = fmpQuoteRes.status === "fulfilled" && fmpQuoteRes.value[0] && fmpQuoteRes.value[0].exchange;
@@ -397,7 +429,7 @@ async function loadFairValue(symbol, fhQuotePromise, fhMetricsPromise, fmpQuoteP
     }
 
     if (!methods.length) {
-      const kind = fmpFailureKind([fmpQuoteRes, fmpProfileRes, dcfRes, kmRes, ptRes]);
+      const kind = fmpFailureKind([fmpQuoteRes, fmpProfileRes, ptRes]);
       const fallback = kind === "blocked"
         ? `Fair value methods aren't available for this ticker on the free FMP plan. Current price: $${fmtNum(price, { maximumFractionDigits: 2 })}.`
         : "Fair value data isn't available for this ticker.";
@@ -405,7 +437,7 @@ async function loadFairValue(symbol, fhQuotePromise, fhMetricsPromise, fmpQuoteP
       return;
     }
 
-    const withDiff = methods.map((m) => ({ ...m, diffPct: ((price - m.value) / m.value) * 100 }));
+    const withDiff = methods.map((method) => ({ ...method, diffPct: ((price - method.value) / method.value) * 100 }));
     const verdicts = withDiff.map((m) => verdictFor(m.diffPct).verdict);
     const agreeCount = Math.max(...["Overvalued", "Undervalued", "Fair"].map((v) => verdicts.filter((x) => x === v).length));
     const majority = verdicts.find((v) => verdicts.filter((x) => x === v).length === agreeCount);
@@ -507,31 +539,35 @@ async function loadRatings(symbol, fhRecPromise, priceTargetPromise) {
 }
 
 // ---------- Financials ----------
+// Balance sheet/income/cash flow come from SEC EDGAR (free, unlimited, the
+// original source FMP itself builds from) instead of FMP — see the Cloud
+// Function's sec-financials endpoint. Ratios comes from Finnhub's basic
+// financials (also free/unlimited) instead of FMP, but as a current snapshot
+// rather than a 5-year history, since that's the shape Finnhub's free tier
+// actually offers.
 
-const FIN_ENDPOINTS = {
-  balance: { path: "balance-sheet", rows: [
+const FIN_STATEMENT_ROWS = {
+  balance: [
     ["Total Assets", "totalAssets"], ["Total Liabilities", "totalLiabilities"],
     ["Total Equity", "totalStockholdersEquity"], ["Cash & Equivalents", "cashAndCashEquivalents"],
-    ["Total Debt", "totalDebt"], ["Net Debt", "netDebt"],
-  ]},
-  income: { path: "income-statement", rows: [
+  ],
+  income: [
     ["Revenue", "revenue"], ["Gross Profit", "grossProfit"], ["Operating Income", "operatingIncome"],
-    ["Net Income", "netIncome"], ["EPS", "eps"], ["EBITDA", "ebitda"],
-  ]},
-  cashflow: { path: "cash-flow", rows: [
+    ["Net Income", "netIncome"], ["EPS", "eps"],
+  ],
+  cashflow: [
     ["Operating Cash Flow", "operatingCashFlow"], ["Capital Expenditure", "capitalExpenditure"],
     ["Free Cash Flow", "freeCashFlow"], ["Dividends Paid", "netDividendsPaid"],
-  ]},
-  ratios: { path: "ratios", rows: [
-    ["Current Ratio", "currentRatio"], ["Debt / Equity", "debtToEquityRatio"],
-    ["Gross Margin", "grossProfitMargin"], ["Net Margin", "netProfitMargin"],
-    ["Dividend Yield", "dividendYield"], ["Price / Book", "priceToBookRatio"],
-  ]},
+  ],
 };
+
+const SEC_STATEMENT_KEY = { balance: "balanceSheet", income: "incomeStatement", cashflow: "cashFlow" };
 
 let finCache = {};
 let currentSymbol = null;
 let activeFinTab = "balance";
+let currentSecPromise = null;
+let currentFhMetricsPromise = null;
 
 $("#fin-tabs").addEventListener("click", (e) => {
   const btn = e.target.closest(".tab-btn");
@@ -541,20 +577,27 @@ $("#fin-tabs").addEventListener("click", (e) => {
   renderFinTab();
 });
 
-async function loadFinancials(symbol) {
-  await fetchFinTab("balance", symbol);
+async function loadFinancials(symbol, secPromise, fhMetricsPromise) {
+  currentSecPromise = secPromise;
+  currentFhMetricsPromise = fhMetricsPromise;
+  await fetchFinTab("balance");
   renderFinTab();
 }
 
-function fetchFinTab(tab, symbol) {
+function fetchFinTab(tab) {
   // Caches the in-flight promise itself, synchronously, not just the
   // resolved result — otherwise two callers racing before either's first
-  // await (e.g. loadHero and loadFairValue both wanting "income") would
-  // each see an empty cache slot and fire duplicate requests.
+  // await could each see an empty cache slot and fire duplicate requests.
   if (!finCache[tab]) {
-    finCache[tab] = api(`${FIN_ENDPOINTS[tab].path}/${symbol}`)
-      .then((data) => ({ data, error: null }))
-      .catch((err) => ({ data: null, error: err }));
+    if (tab === "ratios") {
+      finCache[tab] = currentFhMetricsPromise
+        .then((data) => ({ data: data && data.metric, error: null }))
+        .catch((err) => ({ data: null, error: err }));
+    } else {
+      finCache[tab] = currentSecPromise
+        .then((data) => ({ data: data && data[SEC_STATEMENT_KEY[tab]], error: null }))
+        .catch((err) => ({ data: null, error: err }));
+    }
   }
   return finCache[tab];
 }
@@ -564,34 +607,32 @@ async function renderFinTab() {
   const tab = activeFinTab;
   const symbol = currentSymbol;
   el.innerHTML = `<div class="spinner-line">Loading…</div>`;
-  const result = await fetchFinTab(tab, symbol);
+  const result = await fetchFinTab(tab);
   if (symbol !== currentSymbol || tab !== activeFinTab) return; // stale response, ticker/tab changed since
 
+  if (tab === "ratios") {
+    renderRatiosTab(el, result);
+    return;
+  }
+
   if (result.error || !Array.isArray(result.data) || !result.data.length) {
-    let msg = "No data available.";
-    if (result.error && result.error.status === 429) {
-      msg = fmpFailureNote("rate-limited");
-    } else if (result.error && (result.error.status === 403 || result.error.status === 402)) {
-      msg = "This statement isn't available for this ticker on the free FMP plan.";
-    }
+    const msg = result.error && result.error.status === 404
+      ? "No SEC filings found for this ticker — it may not be a US SEC filer."
+      : "No data available.";
     el.innerHTML = `<div class="muted-note">${msg}</div>`;
     return;
   }
 
   const periods = result.data.slice(0, 5);
-  const rowsDef = FIN_ENDPOINTS[tab].rows;
-  const isPct = (key) => ["grossProfitMargin", "netProfitMargin", "dividendYield"].includes(key);
-  const isRatio = (key) => ["currentRatio", "debtToEquityRatio", "priceToBookRatio"].includes(key);
+  const rowsDef = FIN_STATEMENT_ROWS[tab];
 
-  const header = `<tr><th>Metric</th>${periods.map((p) => `<th>${p.fiscalYear || (p.date || "").slice(0, 4)}</th>`).join("")}</tr>`;
+  const header = `<tr><th>Metric</th>${periods.map((p) => `<th>${p.fiscalYear}</th>`).join("")}</tr>`;
   const body = rowsDef
     .map(([label, key]) => {
       const cells = periods
         .map((p) => {
           const v = p[key];
           if (v === undefined || v === null) return "<td>—</td>";
-          if (isPct(key)) return `<td>${fmtPct(v)}</td>`;
-          if (isRatio(key)) return `<td>${fmtNum(v, { maximumFractionDigits: 2 })}</td>`;
           if (key === "eps") return `<td>$${fmtNum(v, { maximumFractionDigits: 2 })}</td>`;
           return `<td>${fmtBig(v)}</td>`;
         })
@@ -600,18 +641,45 @@ async function renderFinTab() {
     })
     .join("");
 
-  el.innerHTML = `<div class="fin-table-wrap"><table class="fin-table"><thead>${header}</thead><tbody>${body}</tbody></table></div>`;
+  el.innerHTML = `<div class="fin-table-wrap"><table class="fin-table"><thead>${header}</thead><tbody>${body}</tbody></table></div>
+    <div class="muted-note" style="margin-top:10px">Source: SEC EDGAR filings (free, unlimited).</div>`;
+}
+
+function renderRatiosTab(el, result) {
+  const m = result.data;
+  if (result.error || !m) {
+    el.innerHTML = `<div class="muted-note">No data available.</div>`;
+    return;
+  }
+  const rows = [
+    ["Current Ratio", m.currentRatioAnnual, "num"],
+    ["Debt / Equity", m["totalDebt/totalEquityAnnual"], "num"],
+    ["Gross Margin", m.grossMarginTTM ?? m.grossMarginAnnual, "pct"],
+    ["Net Margin", m.netProfitMarginTTM ?? m.netProfitMarginAnnual, "pct"],
+    ["Dividend Yield", m.currentDividendYieldTTM, "pct"],
+    ["Price / Book", m.pb ?? m.pbAnnual, "num"],
+    ["Return on Equity", m.roeTTM, "pct"],
+  ];
+  const body = rows
+    .map(([label, v, kind]) => {
+      const display = typeof v === "number" && !Number.isNaN(v)
+        ? (kind === "pct" ? `${v.toFixed(2)}%` : fmtNum(v, { maximumFractionDigits: 2 }))
+        : "—";
+      return `<div class="rating-row"><span class="rating-label">${label}</span><span class="rating-value">${display}</span></div>`;
+    })
+    .join("");
+  el.innerHTML = body + `<div class="muted-note" style="margin-top:10px">Current snapshot from Finnhub (free, unlimited) — not a 5-year history like the other tabs.</div>`;
 }
 
 // ---------- News ----------
 // FMP restricted every news endpoint to paid plans, so this runs through
 // Finnhub's free company-news endpoint instead (proxied the same way, key
-// hidden server-side) — see finnhubApi() above for why it skips the FMP pill.
+// hidden server-side) — see freeApi() above for why it skips the FMP pill.
 
 async function loadNews(symbol) {
   const el = $("#news-body");
   try {
-    const items = await finnhubApi(`news/${symbol}`);
+    const items = await freeApi(`news/${symbol}`);
     if (!Array.isArray(items) || !items.length) {
       el.innerHTML = `<div class="muted-note">No recent news found in the last 14 days.</div>`;
       return;

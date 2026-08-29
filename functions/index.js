@@ -9,20 +9,18 @@ const FINNHUB_BASE = "https://finnhub.io/api/v1";
 // Whitelisted endpoint templates against FMP's current "stable" API.
 // {ticker} is substituted from the request path; everything else is fixed
 // or passed through, so this can't become an open relay for arbitrary paths.
+// DCF, Graham Number, financial statements, and ratios all moved off FMP
+// (see fh-metrics/DIY calc client-side, and sec-financials below) — what's
+// left here is what genuinely has no free unlimited alternative anywhere:
+// FMP's own quant rating, latest analyst grade action, price targets, and
+// forward estimates.
 const ENDPOINTS = {
   quote: (t) => `/quote?symbol=${t}`,
   profile: (t) => `/profile?symbol=${t}`,
-  dcf: (t) => `/discounted-cash-flow?symbol=${t}`,
   "ratings-snapshot": (t) => `/ratings-snapshot?symbol=${t}`,
-  "grades-consensus": (t) => `/grades-consensus?symbol=${t}`,
   grades: (t) => `/grades?symbol=${t}`,
   "price-target": (t) => `/price-target-consensus?symbol=${t}`,
   estimates: (t) => `/analyst-estimates?symbol=${t}&period=annual&limit=8`,
-  "balance-sheet": (t) => `/balance-sheet-statement?symbol=${t}&limit=5`,
-  "income-statement": (t) => `/income-statement?symbol=${t}&limit=5`,
-  "cash-flow": (t) => `/cash-flow-statement?symbol=${t}&limit=5`,
-  ratios: (t) => `/ratios?symbol=${t}&limit=5`,
-  "key-metrics": (t) => `/key-metrics?symbol=${t}&limit=1`,
 };
 
 // sector-pe-snapshot is keyed by exchange+date, not by ticker, so it's worth
@@ -31,6 +29,116 @@ const ENDPOINTS = {
 // method from burning extra FMP quota on every ticker search.
 const sectorPeCache = new Map(); // exchange -> { fetchedAt, rows }
 const SECTOR_PE_TTL_MS = 60 * 60 * 1000;
+
+// SEC EDGAR — free, unlimited (no key, just a descriptive User-Agent per
+// their fair-access policy), and the original source FMP/Finnhub both build
+// their own numbers from. Used for balance sheet/income/cash flow statements
+// so those tabs stop depending on FMP's 250/day quota entirely.
+const SEC_UA = "stock-screener-personal-project (contact: jakemawby23@gmail.com)";
+const SEC_BASE = "https://data.sec.gov";
+
+let cikMap = null;
+let cikMapFetchedAt = 0;
+const CIK_MAP_TTL_MS = 24 * 60 * 60 * 1000;
+
+async function ensureCikMap() {
+  if (cikMap && Date.now() - cikMapFetchedAt < CIK_MAP_TTL_MS) return cikMap;
+  const res = await fetch("https://www.sec.gov/files/company_tickers.json", { headers: { "User-Agent": SEC_UA } });
+  if (!res.ok) return cikMap; // keep serving a stale map rather than nothing, if SEC hiccups
+  const body = await res.json();
+  const map = new Map();
+  Object.values(body).forEach((v) => map.set(String(v.ticker).toUpperCase(), String(v.cik_str).padStart(10, "0")));
+  cikMap = map;
+  cikMapFetchedAt = Date.now();
+  return map;
+}
+
+const companyFactsCache = new Map(); // cik -> { fetchedAt, facts }
+const FACTS_TTL_MS = 6 * 60 * 60 * 1000;
+
+async function getCompanyFacts(cik) {
+  const cached = companyFactsCache.get(cik);
+  if (cached && Date.now() - cached.fetchedAt < FACTS_TTL_MS) return cached.facts;
+  const res = await fetch(`${SEC_BASE}/api/xbrl/companyfacts/CIK${cik}.json`, { headers: { "User-Agent": SEC_UA } });
+  if (!res.ok) return null;
+  const facts = await res.json();
+  companyFactsCache.set(cik, { fetchedAt: Date.now(), facts });
+  return facts;
+}
+
+// Companies tag the same real-world concept with different XBRL tags
+// depending on their filing history — e.g. Apple's "Revenues" tag only has
+// data through FY2018, before they switched to
+// "RevenueFromContractWithCustomerExcludingAssessedTax". Taking the first
+// candidate tag with ANY data (rather than merging all of them) silently
+// drops recent years whenever a company has switched tags, so every
+// candidate is merged into one series instead, keyed by the exact period end
+// date (not SEC's "fy" field, which reflects which filing disclosed a value,
+// not which period it covers — a 10-K routinely re-discloses prior years as
+// comparatives under its own fy, which would misalign them against other
+// line items' fiscal years if used as the join key).
+function extractSeries(facts, tags) {
+  const gaap = facts && facts.facts && facts.facts["us-gaap"];
+  if (!gaap) return [];
+  const merged = new Map(); // period-end date -> entry
+  for (const tag of tags) {
+    const concept = gaap[tag];
+    const units = concept && concept.units && (concept.units.USD || concept.units["USD/shares"]);
+    if (!units) continue;
+    const annual = units.filter((e) => {
+      if (e.form !== "10-K" || e.fp !== "FY") return false;
+      if (!e.start || !e.end) return true; // instant fact (balance sheet) — no duration to check
+      const days = (new Date(e.end) - new Date(e.start)) / 86400000;
+      return days > 340; // excludes quarterly comparatives disclosed inside the same 10-K
+    });
+    for (const e of annual) {
+      const existing = merged.get(e.end);
+      if (!existing || (e.filed || "") > (existing.filed || "")) merged.set(e.end, e);
+    }
+  }
+  return [...merged.entries()].map(([end, e]) => ({ end, val: e.val })).sort((a, b) => (a.end < b.end ? 1 : -1));
+}
+
+const SEC_LINE_ITEMS = {
+  balanceSheet: [
+    ["totalAssets", ["Assets"]],
+    ["totalLiabilities", ["Liabilities"]],
+    ["totalStockholdersEquity", ["StockholdersEquity", "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest"]],
+    ["cashAndCashEquivalents", ["CashAndCashEquivalentsAtCarryingValue", "CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents"]],
+  ],
+  incomeStatement: [
+    ["revenue", ["Revenues", "RevenueFromContractWithCustomerExcludingAssessedTax", "SalesRevenueNet"]],
+    ["grossProfit", ["GrossProfit"]],
+    ["operatingIncome", ["OperatingIncomeLoss"]],
+    ["netIncome", ["NetIncomeLoss"]],
+    ["eps", ["EarningsPerShareDiluted", "EarningsPerShareBasic"]],
+  ],
+  cashFlow: [
+    ["operatingCashFlow", ["NetCashProvidedByUsedInOperatingActivities"]],
+    ["capitalExpenditure", ["PaymentsToAcquirePropertyPlantAndEquipment"]],
+    ["netDividendsPaid", ["PaymentsOfDividends", "PaymentsOfDividendsCommonStock"]],
+  ],
+};
+
+function buildStatement(facts, items) {
+  const seriesByKey = {};
+  for (const [key, tags] of items) {
+    seriesByKey[key] = new Map(extractSeries(facts, tags).map((s) => [s.end, s.val]));
+  }
+  let bestKey = items[0][0];
+  for (const [key] of items) {
+    if (seriesByKey[key].size > seriesByKey[bestKey].size) bestKey = key;
+  }
+  const ends = [...seriesByKey[bestKey].keys()].sort().reverse().slice(0, 5);
+  return ends.map((end) => {
+    const row = { fiscalYear: String(new Date(end).getFullYear()) };
+    for (const [key] of items) {
+      const v = seriesByKey[key].get(end);
+      row[key] = v === undefined ? null : v;
+    }
+    return row;
+  });
+}
 
 const ALLOWED_ORIGINS = new Set([
   "https://jm2332.github.io",
@@ -124,6 +232,30 @@ exports.api = onRequest({ secrets: [FMP_API_KEY, FINNHUB_API_KEY], cors: false }
 
       const match = rows && rows.find((r) => r.sector === sector);
       return res.status(200).json(match || null);
+    }
+
+    if (endpoint === "sec-financials") {
+      if (!ticker || !/^[A-Za-z0-9.\-]{1,10}$/.test(ticker)) {
+        return res.status(400).json({ error: "invalid or missing ticker" });
+      }
+      const map = await ensureCikMap();
+      const cik = map && map.get(ticker.toUpperCase());
+      if (!cik) return res.status(404).json({ error: "no SEC filer found for this ticker" });
+      const facts = await getCompanyFacts(cik);
+      if (!facts) return res.status(502).json({ error: "SEC data unavailable" });
+
+      const balanceSheet = buildStatement(facts, SEC_LINE_ITEMS.balanceSheet);
+      const incomeStatement = buildStatement(facts, SEC_LINE_ITEMS.incomeStatement);
+      const cashFlow = buildStatement(facts, SEC_LINE_ITEMS.cashFlow).map((row) => {
+        // XBRL reports capex/dividends as positive payment amounts; flip to
+        // negative (cash outflow) to match how the app displays cash flow.
+        if (row.capitalExpenditure != null) row.capitalExpenditure = -Math.abs(row.capitalExpenditure);
+        if (row.netDividendsPaid != null) row.netDividendsPaid = -Math.abs(row.netDividendsPaid);
+        if (row.operatingCashFlow != null && row.capitalExpenditure != null) row.freeCashFlow = row.operatingCashFlow + row.capitalExpenditure;
+        return row;
+      });
+
+      return res.status(200).json({ balanceSheet, incomeStatement, cashFlow });
     }
 
     if (endpoint === "search") {
