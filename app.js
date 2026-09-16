@@ -312,10 +312,20 @@ function showHome() {
   loadHomeContent();
 }
 
+function renderHomeGreeting() {
+  const hour = new Date().getHours();
+  const timeGreeting = hour < 5 ? "Still up?" : hour < 12 ? "Good morning" : hour < 18 ? "Good afternoon" : "Good evening";
+  $("#home-greeting-title").textContent = timeGreeting;
+  $("#home-greeting-date").textContent = new Date().toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric" });
+}
+
 async function loadHomeContent() {
+  renderHomeGreeting();
   const symbols = watchlist.slice();
   const tilesEl = $("#home-tiles");
   const newsEl = $("#home-news");
+  const pulseEl = $("#home-pulse");
+  pulseEl.classList.add("hidden");
   if (!symbols.length) {
     tilesEl.innerHTML = `<div class="muted-note">Search a ticker and click the star to add it to your watchlist — it'll show up here.</div>`;
     newsEl.innerHTML = "";
@@ -326,15 +336,17 @@ async function loadHomeContent() {
 
   const results = await Promise.all(
     symbols.map(async (sym) => {
-      const [quoteRes, profileRes, newsRes] = await Promise.allSettled([
+      const [quoteRes, profileRes, metricsRes, newsRes] = await Promise.allSettled([
         freeApi(`fh-quote/${sym}`),
         freeApi(`fh-profile/${sym}`),
+        freeApi(`fh-metrics/${sym}`),
         freeApi(`news/${sym}`),
       ]);
       return {
         symbol: sym,
         quote: quoteRes.status === "fulfilled" ? quoteRes.value : null,
         profile: profileRes.status === "fulfilled" ? profileRes.value : null,
+        metrics: metricsRes.status === "fulfilled" && metricsRes.value ? metricsRes.value.metric : null,
         news: newsRes.status === "fulfilled" && Array.isArray(newsRes.value) ? newsRes.value : [],
       };
     })
@@ -342,18 +354,47 @@ async function loadHomeContent() {
 
   if (watchlist.join(",") !== symbols.join(",")) return; // stale — watchlist changed mid-fetch
 
+  // Market-pulse summary: how many of today's watchlist moves are up vs down.
+  const withMoves = results.filter((r) => r.quote && typeof r.quote.d === "number");
+  if (withMoves.length) {
+    const upCount = withMoves.filter((r) => r.quote.d >= 0).length;
+    const downCount = withMoves.length - upCount;
+    pulseEl.innerHTML = `<span class="pulse-up">▲ ${upCount}</span><span class="pulse-sep">/</span><span class="pulse-down">▼ ${downCount}</span> today`;
+    pulseEl.classList.remove("hidden");
+  }
+
   tilesEl.innerHTML = results
     .map((r) => {
       const q = r.quote;
+      const m = r.metrics;
       if (!q || q.c === undefined) {
         return `<div class="home-tile" data-symbol="${r.symbol}"><div class="home-tile-symbol">${r.symbol}</div><div class="muted-note">Unavailable</div></div>`;
       }
       const up = q.d >= 0;
-      return `<div class="home-tile" data-symbol="${r.symbol}">
-        <div class="home-tile-symbol">${r.symbol}</div>
-        <div class="home-tile-name">${(r.profile && r.profile.name) || ""}</div>
+      const accent = up ? "var(--green)" : "var(--red)";
+      const logo = r.profile && r.profile.logo;
+
+      let rangeHtml = "";
+      if (m && typeof m["52WeekLow"] === "number" && typeof m["52WeekHigh"] === "number" && m["52WeekHigh"] > m["52WeekLow"]) {
+        const pct = Math.min(100, Math.max(0, ((q.c - m["52WeekLow"]) / (m["52WeekHigh"] - m["52WeekLow"])) * 100));
+        rangeHtml = `
+          <div class="home-tile-range" style="--tile-accent:${accent}">
+            <div class="home-tile-range-track"><div class="home-tile-range-fill" style="left:${pct.toFixed(1)}%"></div></div>
+            <div class="home-tile-range-labels"><span>$${fmtNum(m["52WeekLow"], { maximumFractionDigits: 0 })}</span><span>$${fmtNum(m["52WeekHigh"], { maximumFractionDigits: 0 })}</span></div>
+          </div>`;
+      }
+
+      return `<div class="home-tile" data-symbol="${r.symbol}" style="--tile-accent:${accent}">
+        <div class="home-tile-top">
+          ${logo ? `<img class="home-tile-logo" src="${logo}" loading="lazy" onerror="this.remove()" />` : ""}
+          <div>
+            <div class="home-tile-symbol">${r.symbol}</div>
+            <div class="home-tile-name">${(r.profile && r.profile.name) || ""}</div>
+          </div>
+        </div>
         <div class="home-tile-price">$${fmtNum(q.c, { maximumFractionDigits: 2 })}</div>
         <div class="home-tile-change ${up ? "up" : "down"}">${up ? "+" : ""}${fmtNum(q.d, { maximumFractionDigits: 2 })} (${up ? "+" : ""}${fmtNum(q.dp, { maximumFractionDigits: 2 })}%)</div>
+        ${rangeHtml}
       </div>`;
     })
     .join("");
@@ -364,7 +405,7 @@ async function loadHomeContent() {
   const allNews = results
     .flatMap((r) => r.news.map((n) => ({ ...n, _symbol: r.symbol })))
     .sort((a, b) => (b.datetime || 0) - (a.datetime || 0))
-    .slice(0, 15);
+    .slice(0, 12);
 
   if (!allNews.length) {
     newsEl.innerHTML = `<div class="muted-note">No recent news found for your watchlist.</div>`;
@@ -372,13 +413,14 @@ async function loadHomeContent() {
   }
   newsEl.innerHTML = allNews
     .map((it) => {
-      const date = it.datetime ? new Date(it.datetime * 1000).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" }) : "";
+      const date = it.datetime ? new Date(it.datetime * 1000).toLocaleDateString(undefined, { month: "short", day: "numeric" }) : "";
       return `
-      <a class="news-item" href="${it.url}" target="_blank" rel="noopener noreferrer">
-        ${it.image ? `<img class="news-thumb" src="${it.image}" loading="lazy" onerror="this.remove()" />` : ""}
-        <div>
-          <div class="news-title">[${it._symbol}] ${it.headline || ""}</div>
-          <div class="news-meta">${it.source || ""} · ${date}</div>
+      <a class="home-news-card" href="${it.url}" target="_blank" rel="noopener noreferrer">
+        ${it.image ? `<img class="home-news-card-img" src="${it.image}" loading="lazy" onerror="this.remove()" onload="if(this.naturalHeight&lt;80||this.naturalWidth/this.naturalHeight&gt;2.5)this.remove()" />` : ""}
+        <div class="home-news-card-body">
+          <span class="home-news-card-tag">${it._symbol}</span>
+          <div class="home-news-card-title">${it.headline || ""}</div>
+          <div class="home-news-card-meta">${it.source || ""} · ${date}</div>
         </div>
       </a>`;
     })

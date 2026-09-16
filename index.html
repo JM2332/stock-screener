@@ -10,7 +10,7 @@
 <meta name="apple-mobile-web-app-capable" content="yes" />
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
 <meta name="apple-mobile-web-app-title" content="Screener" />
-<link rel="stylesheet" href="style.css?v=202608290008" />
+<link rel="stylesheet" href="style.css?v=202609160001" />
 <script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore-compat.js"></script>
 </head>
@@ -39,6 +39,14 @@
 <main id="app">
 
   <div id="home-view" class="home-view">
+    <div class="home-greeting">
+      <div>
+        <h1 id="home-greeting-title">Welcome back</h1>
+        <p id="home-greeting-date" class="home-greeting-date"></p>
+      </div>
+      <div id="home-pulse" class="home-pulse hidden"></div>
+    </div>
+
     <div class="card-header-row">
       <h2>Your Watchlist</h2>
     </div>
@@ -49,7 +57,7 @@
     <div class="card-header-row">
       <h2>News for Your Watchlist</h2>
     </div>
-    <div id="home-news" class="news-body"></div>
+    <div id="home-news" class="home-news-grid"></div>
   </div>
 
   <div id="stock-view" class="stock-view hidden">
@@ -165,7 +173,7 @@
 </main>
 
 <script src="https://s3.tradingview.com/tv.js"></script>
-<script src="app.js?v=202608290014"></script>
+<script src="app.js?v=202609160001"></script>
 <script>if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js?v=202608291200');</script>
 </body>
 </html>

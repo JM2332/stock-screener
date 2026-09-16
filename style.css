@@ -412,26 +412,149 @@ table.compare-table tbody tr:hover { background: var(--bg-elevated); }
 
 /* Home view */
 #home-view { display: flex; flex-direction: column; gap: 10px; }
+
+.home-greeting {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 14px;
+  padding: 6px 2px 18px;
+}
+.home-greeting h1 {
+  margin: 0;
+  font-size: 24px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  background: linear-gradient(135deg, var(--text) 40%, var(--accent) 120%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+.home-greeting-date { margin: 4px 0 0; color: var(--text-faint); font-size: 13px; }
+.home-pulse {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: var(--card);
+  border: 1px solid var(--card-border);
+  border-radius: 999px;
+  padding: 8px 16px;
+  font-size: 12.5px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.home-pulse.hidden { display: none; }
+.home-pulse .pulse-up { color: var(--green); }
+.home-pulse .pulse-down { color: var(--red); }
+.home-pulse .pulse-sep { color: var(--card-border); }
+
 .card-header-row { display: flex; align-items: center; justify-content: space-between; margin-top: 8px; }
 .card-header-row h2 {
   font-size: 13px; font-weight: 600; text-transform: uppercase;
   letter-spacing: 0.04em; color: var(--text-dim); margin: 0;
 }
-.home-tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 14px; margin-bottom: 8px; }
+
+.home-tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 14px; margin-bottom: 8px; }
 .home-tile {
-  background: var(--card);
+  position: relative;
+  background: linear-gradient(160deg, var(--card) 0%, var(--bg-elevated) 130%);
   border: 1px solid var(--card-border);
   border-radius: var(--radius);
-  padding: 16px 18px;
+  padding: 16px 18px 14px;
   cursor: pointer;
+  overflow: hidden;
+  transition: transform 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
 }
-.home-tile:hover { border-color: var(--accent); }
-.home-tile-symbol { font-weight: 700; font-size: 14px; }
-.home-tile-name { color: var(--text-faint); font-size: 11.5px; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.home-tile-price { font-size: 18px; font-weight: 700; margin-top: 10px; font-variant-numeric: tabular-nums; }
+.home-tile::before {
+  content: "";
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  height: 3px;
+  background: var(--tile-accent, var(--text-faint));
+}
+.home-tile:hover {
+  border-color: var(--accent);
+  transform: translateY(-2px);
+  box-shadow: var(--shadow);
+}
+.home-tile-top { display: flex; align-items: center; gap: 10px; }
+.home-tile-logo {
+  width: 30px; height: 30px;
+  border-radius: 8px;
+  /* Finnhub logos are often dark-on-transparent, invisible against this
+     dark theme — a light backing plate keeps any logo legible. */
+  background: #f4f5f7;
+  padding: 4px;
+  object-fit: contain;
+  flex-shrink: 0;
+  border: 1px solid var(--card-border);
+  box-sizing: border-box;
+}
+.home-tile-symbol { font-weight: 700; font-size: 14px; line-height: 1.2; }
+.home-tile-name { color: var(--text-faint); font-size: 11px; margin-top: 1px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 140px; }
+.home-tile-price { font-size: 21px; font-weight: 700; margin-top: 14px; font-variant-numeric: tabular-nums; letter-spacing: -0.01em; }
 .home-tile-change { font-size: 12.5px; font-weight: 600; margin-top: 2px; }
 .home-tile-change.up { color: var(--green); }
 .home-tile-change.down { color: var(--red); }
+
+.home-tile-range { margin-top: 14px; }
+.home-tile-range-track {
+  position: relative;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--card-border);
+  overflow: visible;
+}
+.home-tile-range-fill {
+  position: absolute;
+  top: 50%;
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  background: var(--tile-accent, var(--text-dim));
+  border: 2px solid var(--card);
+  transform: translate(-50%, -50%);
+}
+.home-tile-range-labels {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 5px;
+  font-size: 10px;
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Home news — card grid rather than the flat list used on the single-ticker
+   page, so the home page reads more like a front page. */
+.home-news-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; }
+.home-news-card {
+  display: flex;
+  flex-direction: column;
+  background: var(--card);
+  border: 1px solid var(--card-border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  text-decoration: none;
+  color: inherit;
+  transition: border-color 0.15s ease, transform 0.15s ease;
+}
+.home-news-card:hover { border-color: var(--accent); transform: translateY(-2px); }
+.home-news-card-img { width: 100%; height: 120px; object-fit: cover; background: var(--bg-elevated); }
+.home-news-card-body { padding: 12px 14px 14px; }
+.home-news-card-tag {
+  display: inline-block;
+  font-size: 10.5px;
+  font-weight: 700;
+  color: var(--accent);
+  background: var(--accent-dim);
+  border-radius: 5px;
+  padding: 2px 7px;
+  margin-bottom: 7px;
+  letter-spacing: 0.02em;
+}
+.home-news-card-title { font-size: 13px; font-weight: 500; line-height: 1.4; }
+.home-news-card:hover .home-news-card-title { color: var(--accent); }
+.home-news-card-meta { color: var(--text-faint); font-size: 11px; margin-top: 7px; }
 
 /* Watchlist panel live tiles */
 .watchlist-panel .search-row { align-items: center; }
