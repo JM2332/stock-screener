@@ -204,7 +204,12 @@ const SCREENER_TTL_MS = 20 * 60 * 1000;
 // Finnhub's free-tier 60/min cap over a few seconds — which would 429 every
 // other feature in the app sharing the same key (home page, ticker pages,
 // checkAlerts) for the rest of that minute, not just the screener itself.
-// 50/min leaves some headroom for other concurrent app traffic.
+// 50/min leaves some headroom for other concurrent app traffic. Note this
+// window is per-service (api and warmScreenerCache each throttle
+// independently, same reason the cache itself had to move to Firestore) —
+// in the rare case both are genuinely hitting Finnhub at once, rather than
+// one serving from the other's warmed Firestore cache, the combined rate
+// could exceed 50/min. Not worth a cross-service counter for a personal app.
 const SCREENER_RATE_LIMIT_PER_MIN = 50;
 const screenerRequestTimes = [];
 
@@ -219,9 +224,32 @@ async function throttleScreenerRequests(count) {
   for (let i = 0; i < count; i++) screenerRequestTimes.push(now);
 }
 
+// Firestore-backed, not just in-memory: Functions v2 deploys `api` and
+// `warmScreenerCache` as separate Cloud Run services, each with its own
+// process, so an in-memory Map alone would mean the warming job populates a
+// cache nobody else ever reads. Firestore is the layer that actually lets
+// the warming job's fetches speed up real requests to `api`. The in-memory
+// Map stays as a same-instance fast path so a warm `api` container doesn't
+// re-read Firestore on every call within its own lifetime.
+const SCREENER_CACHE_COLLECTION = "screenerCache";
+
 async function getScreenerRow(symbol, finnhubKey) {
   const cached = screenerCache.get(symbol);
   if (cached && Date.now() - cached.fetchedAt < SCREENER_TTL_MS) return cached;
+
+  try {
+    const doc = await db.collection(SCREENER_CACHE_COLLECTION).doc(symbol).get();
+    if (doc.exists) {
+      const data = doc.data();
+      if (data.fetchedAt && Date.now() - data.fetchedAt < SCREENER_TTL_MS) {
+        screenerCache.set(symbol, data);
+        return data;
+      }
+    }
+  } catch (err) {
+    console.error("screenerCache Firestore read failed:", err);
+  }
+
   await throttleScreenerRequests(2);
   const [quoteRes, metricsRes] = await Promise.allSettled([
     fetch(`${FINNHUB_BASE}/quote?symbol=${symbol}&token=${finnhubKey}`).then((r) => (r.ok ? r.json() : null)),
@@ -232,7 +260,17 @@ async function getScreenerRow(symbol, finnhubKey) {
     quote: quoteRes.status === "fulfilled" ? quoteRes.value : null,
     metrics: metricsRes.status === "fulfilled" && metricsRes.value ? metricsRes.value.metric : null,
   };
-  screenerCache.set(symbol, entry);
+  // Only persist a genuine success. A transient Finnhub hiccup (a momentary
+  // 5xx, a request cut short by this function's own timeout) otherwise gets
+  // cached as if it were real data — real bug hit in practice: several
+  // tickers were served as "—" for a full 20-minute TTL because one bad
+  // fetch got frozen into the cache alongside all the good ones. Without
+  // quote data there's nothing worth showing anyway, so skip caching and let
+  // the next call (warming cycle or a live request) retry from scratch.
+  if (entry.quote) {
+    screenerCache.set(symbol, entry);
+    db.collection(SCREENER_CACHE_COLLECTION).doc(symbol).set(entry).catch((err) => console.error("screenerCache Firestore write failed:", err));
+  }
   return entry;
 }
 
@@ -273,7 +311,12 @@ async function fetchFmp(path, res) {
   res.status(upstream.status).set("Content-Type", "application/json").send(body);
 }
 
-exports.api = onRequest({ secrets: [FMP_API_KEY, FINNHUB_API_KEY], cors: false }, async (req, res) => {
+// timeoutSeconds bumped from the 60s default: a fully cold /screener request
+// (no Firestore cache yet, e.g. right after this deploy, before
+// warmScreenerCache's first scheduled run) can take several minutes under
+// the Finnhub rate throttle. Every other endpoint here finishes in well
+// under a second, so the higher ceiling doesn't change anything for them.
+exports.api = onRequest({ secrets: [FMP_API_KEY, FINNHUB_API_KEY], cors: false, timeoutSeconds: 300 }, async (req, res) => {
   setCors(req, res);
   if (req.method === "OPTIONS") {
     res.status(204).send("");
@@ -490,6 +533,21 @@ exports.api = onRequest({ secrets: [FMP_API_KEY, FINNHUB_API_KEY], cors: false }
     res.status(502).json({ error: "upstream fetch failed" });
   }
 });
+
+// Keeps the screener cache warm so an actual page load (a user opening the
+// screener/popular-stocks view) almost always hits cache instead of
+// triggering a cold fetch of all 88 tickers — which, throttled to 50
+// Finnhub calls/min (see throttleScreenerRequests), would otherwise take
+// several minutes on the very view meant to be a fast, default landing page.
+// Runs a bit more often than the 20-min cache TTL so entries never fully
+// expire between warmings. Long timeout because a fully cold run (176 calls
+// at 50/min) genuinely takes minutes, not seconds.
+exports.warmScreenerCache = onSchedule(
+  { schedule: "every 15 minutes", secrets: [FINNHUB_API_KEY], timeoutSeconds: 300 },
+  async () => {
+    await mapWithConcurrency(SCREENER_UNIVERSE, 10, ([symbol]) => getScreenerRow(symbol, FINNHUB_API_KEY.value()));
+  }
+);
 
 // Price alerts: runs every 15 minutes, checks each saved threshold against a
 // live Finnhub quote, and pushes a notification the moment it's crossed —

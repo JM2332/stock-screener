@@ -845,6 +845,7 @@ $("#screener-toggle").addEventListener("click", () => {
     currentView = "screener";
     $("#screener-toggle").classList.add("active");
     screenerView.classList.remove("hidden");
+    loadPopularBrowse();
   }
 });
 
@@ -855,15 +856,70 @@ function exitScreenerMode() {
   screenerView.classList.add("hidden");
 }
 
+// Default landing state for the Screener view: every curated ticker,
+// grouped by sector, as browsable cards — no filters required. Running an
+// actual filtered screen (below) replaces this with the flat sorted table;
+// Reset brings this back.
+async function loadPopularBrowse() {
+  const body = $("#screener-results-body");
+  $("#screener-results-title").textContent = "Popular Stocks";
+  body.innerHTML = `<div class="spinner-line">Loading popular stocks…</div>`;
+
+  let rows;
+  try {
+    rows = await freeApi("screener");
+  } catch (err) {
+    body.innerHTML = `<div class="muted-note">Couldn't load popular stocks — try again (${err.message}).</div>`;
+    return;
+  }
+  if (!Array.isArray(rows) || !rows.length) {
+    body.innerHTML = `<div class="muted-note">No data available right now.</div>`;
+    return;
+  }
+
+  const bySector = new Map();
+  for (const r of rows) {
+    if (!bySector.has(r.sector)) bySector.set(r.sector, []);
+    bySector.get(r.sector).push(r);
+  }
+
+  body.innerHTML = SCREENER_SECTORS
+    .filter((s) => bySector.has(s))
+    .map((sector) => {
+      const items = bySector.get(sector).sort((a, b) => (b.marketCap || 0) - (a.marketCap || 0));
+      const cards = items
+        .map((r) => {
+          const up = typeof r.changePct === "number" && r.changePct >= 0;
+          return `<div class="popular-card" data-symbol="${r.symbol}">
+            <div class="popular-card-symbol">${r.symbol}</div>
+            <div class="popular-card-name">${r.name}</div>
+            <div class="popular-card-price">${typeof r.price === "number" ? "$" + fmtNum(r.price, { maximumFractionDigits: 2 }) : "—"}</div>
+            <div class="popular-card-change ${typeof r.changePct === "number" ? (up ? "up" : "down") : ""}">${typeof r.changePct === "number" ? `${up ? "+" : ""}${fmtNum(r.changePct, { maximumFractionDigits: 2 })}%` : "—"}</div>
+          </div>`;
+        })
+        .join("");
+      return `<div class="popular-sector-section">
+        <h3 class="popular-sector-heading">${sector}</h3>
+        <div class="popular-grid">${cards}</div>
+      </div>`;
+    })
+    .join("");
+
+  body.querySelectorAll(".popular-card").forEach((card) => {
+    card.addEventListener("click", () => selectTicker(card.dataset.symbol));
+  });
+}
+
 $("#screener-run").addEventListener("click", runScreen);
 $("#screener-reset").addEventListener("click", () => {
   ["screener-sector", "screener-mcap-min", "screener-mcap-max", "screener-price-min", "screener-price-max", "screener-beta-min", "screener-beta-max", "screener-div-min"]
     .forEach((id) => ($(`#${id}`).value = ""));
-  $("#screener-results-body").innerHTML = `<div class="muted-note">Set your filters above and click Run Screen.</div>`;
+  loadPopularBrowse();
 });
 
 async function runScreen() {
   const body = $("#screener-results-body");
+  $("#screener-results-title").textContent = "Results";
   body.innerHTML = `<div class="spinner-line">Screening…</div>`;
 
   const sector = $("#screener-sector").value;

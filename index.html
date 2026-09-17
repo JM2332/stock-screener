@@ -10,7 +10,7 @@
 <meta name="apple-mobile-web-app-capable" content="yes" />
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
 <meta name="apple-mobile-web-app-title" content="Screener" />
-<link rel="stylesheet" href="style.css?v=202609170002" />
+<link rel="stylesheet" href="style.css?v=202609170003" />
 <script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore-compat.js"></script>
 </head>
@@ -193,16 +193,16 @@
     </section>
 
     <section class="card" id="screener-results-card">
-      <h2>Results</h2>
+      <h2 id="screener-results-title">Popular Stocks</h2>
       <div id="screener-results-body" class="card-body">
-        <div class="muted-note">Set your filters above and click Run Screen.</div>
+        <div class="spinner-line">Loading popular stocks…</div>
       </div>
     </section>
   </div>
 </main>
 
 <script src="https://s3.tradingview.com/tv.js"></script>
-<script src="app.js?v=202609170002"></script>
+<script src="app.js?v=202609170003"></script>
 <script>if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js?v=202609160001');</script>
 </body>
 </html>
