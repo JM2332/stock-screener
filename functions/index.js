@@ -44,6 +44,28 @@ const SECTOR_PE_TTL_MS = 60 * 60 * 1000;
 let marketNewsCache = null; // { fetchedAt, body } — same feed for every visitor
 const MARKET_NEWS_TTL_MS = 10 * 60 * 1000;
 
+// Real incident: the home page fires 4 Finnhub calls per watchlisted ticker
+// (quote/profile/metrics/news) on every load, plus a redundant quote fetch
+// from the watchlist dropdown — for 8 tickers that's ~40 calls for a single
+// page load, already a large slice of Finnhub's 60/min budget on its own.
+// Any second load in the same rolling minute (a watchlist edit shortly
+// after opening the app, a refresh, re-visiting home) pushed the combined
+// total over the limit and 429'd every tile. In-memory is enough here
+// (unlike the screener's cross-service cache) since every fh-* and news
+// request lands on this same `api` service. TTLs trade a little staleness
+// for a lot fewer repeat calls: quote short (price should stay live),
+// profile long (name/logo/exchange essentially never change), metrics and
+// news moderate (slow-moving, and 10 min is already how often this app
+// refreshes them anywhere else, e.g. the screener/market-news caches).
+const finnhubEndpointCache = new Map(); // "endpoint:TICKER" -> { fetchedAt, status, body }
+const FH_CACHE_TTL_MS = {
+  "fh-quote": 20 * 1000,
+  "fh-profile": 60 * 60 * 1000,
+  "fh-metrics": 10 * 60 * 1000,
+  "fh-recommendation": 60 * 60 * 1000,
+  news: 10 * 60 * 1000,
+};
+
 // SEC EDGAR — free, unlimited (no key, just a descriptive User-Agent per
 // their fair-access policy), and the original source FMP/Finnhub both build
 // their own numbers from. Used for balance sheet/income/cash flow statements
@@ -334,12 +356,19 @@ exports.api = onRequest({ secrets: [FMP_API_KEY, FINNHUB_API_KEY], cors: false, 
       if (!ticker || !/^[A-Za-z0-9.\-]{1,10}$/.test(ticker)) {
         return res.status(400).json({ error: "invalid or missing ticker" });
       }
+      const t = ticker.toUpperCase();
+      const cacheKey = `news:${t}`;
+      const cached = finnhubEndpointCache.get(cacheKey);
+      if (cached && Date.now() - cached.fetchedAt < FH_CACHE_TTL_MS.news) {
+        return res.status(cached.status).set("Content-Type", "application/json").send(cached.body);
+      }
       const to = new Date();
       const from = new Date(to.getTime() - 14 * 24 * 60 * 60 * 1000);
       const iso = (d) => d.toISOString().slice(0, 10);
-      const url = `${FINNHUB_BASE}/company-news?symbol=${ticker.toUpperCase()}&from=${iso(from)}&to=${iso(to)}&token=${FINNHUB_API_KEY.value()}`;
+      const url = `${FINNHUB_BASE}/company-news?symbol=${t}&from=${iso(from)}&to=${iso(to)}&token=${FINNHUB_API_KEY.value()}`;
       const upstream = await fetch(url);
       const body = await upstream.text();
+      if (upstream.ok) finnhubEndpointCache.set(cacheKey, { fetchedAt: Date.now(), status: upstream.status, body });
       return res.status(upstream.status).set("Content-Type", "application/json").send(body);
     }
 
@@ -368,6 +397,11 @@ exports.api = onRequest({ secrets: [FMP_API_KEY, FINNHUB_API_KEY], cors: false, 
         return res.status(400).json({ error: "invalid or missing ticker" });
       }
       const t = ticker.toUpperCase();
+      const cacheKey = `${endpoint}:${t}`;
+      const cached = finnhubEndpointCache.get(cacheKey);
+      if (cached && Date.now() - cached.fetchedAt < FH_CACHE_TTL_MS[endpoint]) {
+        return res.status(cached.status).set("Content-Type", "application/json").send(cached.body);
+      }
       const path = {
         "fh-quote": `/quote?symbol=${t}`,
         "fh-profile": `/stock/profile2?symbol=${t}`,
@@ -377,6 +411,7 @@ exports.api = onRequest({ secrets: [FMP_API_KEY, FINNHUB_API_KEY], cors: false, 
       const url = `${FINNHUB_BASE}${path}&token=${FINNHUB_API_KEY.value()}`;
       const upstream = await fetch(url);
       const body = await upstream.text();
+      if (upstream.ok) finnhubEndpointCache.set(cacheKey, { fetchedAt: Date.now(), status: upstream.status, body });
       return res.status(upstream.status).set("Content-Type", "application/json").send(body);
     }
 

@@ -40,6 +40,27 @@ async function rawApi(path) {
   return body;
 }
 
+// Real incident: loadHomeContent fires 4 Finnhub calls per watchlisted
+// ticker (quote/profile/metrics/news), all via one Promise.all — for an
+// 8-ticker watchlist that's 32 simultaneous calls in the same tick, which
+// tripped Finnhub's "30 calls/second" hard cap (a separate, stricter limit
+// than their per-minute quota) and 429'd the whole batch. This caps how many
+// tickers are in flight at once so total concurrent calls stay well under
+// that ceiling regardless of watchlist size — same pattern already proven
+// server-side for the screener's Finnhub calls.
+async function mapWithConcurrency(items, limit, fn) {
+  const results = new Array(items.length);
+  let i = 0;
+  async function worker() {
+    while (i < items.length) {
+      const idx = i++;
+      results[idx] = await fn(items[idx], idx);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return results;
+}
+
 // ---------- FMP free-tier usage tracker (250 calls/day) ----------
 
 const FMP_DAILY_LIMIT = 250;
@@ -195,6 +216,13 @@ function saveWatchlistCache() {
   } catch {}
 }
 
+// Declared before the first renderWatchlistUI() call just below (same
+// temporal-dead-zone hazard documented for currentSymbol at the top of this
+// file — a `let` referenced from a function called before its own
+// declaration line executes throws, even though the function itself is
+// hoisted).
+let watchlistRefreshDebounce = null;
+
 loadWatchlistCache();
 renderWatchlistUI();
 
@@ -252,18 +280,31 @@ function renderWatchlistUI() {
         toggleWatch(btn.dataset.symbol);
       });
     });
-    enrichWatchlistPrices(watchlist);
   }
   if (currentSymbol) updateWatchToggleButton(currentSymbol);
-  if (currentView === "home") loadHomeContent();
+
+  // Debounced — real incident: toggling one ticker fires this twice (an
+  // optimistic local update, then Firestore's listener echoing the write
+  // back), and each firing re-fetches quote/profile/metrics/news for EVERY
+  // watchlisted ticker. Adding several tickers in quick succession compounded
+  // that into a burst well past Finnhub's 60/min limit, which 429'd the
+  // whole home page ("Unavailable" on every tile, not just the new ones).
+  // Debouncing collapses a burst of edits into a single fetch once things
+  // settle, instead of one full batch per intermediate change.
+  clearTimeout(watchlistRefreshDebounce);
+  watchlistRefreshDebounce = setTimeout(() => {
+    if (watchlist.length) enrichWatchlistPrices(watchlist);
+    if (currentView === "home") loadHomeContent();
+  }, 600);
 }
 
-// Finnhub is uncapped, so it's cheap to fetch a live quote per watchlisted
-// ticker every time the panel re-renders — used by both the topbar dropdown
-// and the home page's tiles.
+// Finnhub is uncapped per-minute, but concurrency is still throttled (see
+// mapWithConcurrency) — used by both the topbar dropdown and the home page's
+// tiles, so it's cheap in total call count but still needs to avoid bursting
+// alongside loadHomeContent's own concurrent calls.
 async function enrichWatchlistPrices(symbols) {
-  const results = await Promise.all(
-    symbols.map((sym) => freeApi(`fh-quote/${sym}`).then((q) => ({ sym, q })).catch(() => ({ sym, q: null })))
+  const results = await mapWithConcurrency(symbols, 4, (sym) =>
+    freeApi(`fh-quote/${sym}`).then((q) => ({ sym, q })).catch(() => ({ sym, q: null }))
   );
   if (watchlist.join(",") !== symbols.join(",")) return; // stale — watchlist changed mid-fetch
   results.forEach(({ sym, q }) => {
@@ -339,8 +380,7 @@ async function loadHomeContent() {
   tilesEl.innerHTML = `<div class="spinner-line">Loading…</div>`;
   newsEl.innerHTML = `<div class="spinner-line">Loading…</div>`;
 
-  const results = await Promise.all(
-    symbols.map(async (sym) => {
+  const results = await mapWithConcurrency(symbols, 4, async (sym) => {
       const [quoteRes, profileRes, metricsRes, newsRes] = await Promise.allSettled([
         freeApi(`fh-quote/${sym}`),
         freeApi(`fh-profile/${sym}`),
@@ -354,8 +394,7 @@ async function loadHomeContent() {
         metrics: metricsRes.status === "fulfilled" && metricsRes.value ? metricsRes.value.metric : null,
         news: newsRes.status === "fulfilled" && Array.isArray(newsRes.value) ? newsRes.value : [],
       };
-    })
-  );
+  });
 
   if (watchlist.join(",") !== symbols.join(",")) return; // stale — watchlist changed mid-fetch
 
