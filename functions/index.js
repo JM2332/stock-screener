@@ -1,8 +1,18 @@
 const { onRequest } = require("firebase-functions/v2/https");
+const { onSchedule } = require("firebase-functions/v2/scheduler");
 const { defineSecret } = require("firebase-functions/params");
+const admin = require("firebase-admin");
+const webpush = require("web-push");
+
+admin.initializeApp();
+const db = admin.firestore();
 
 const FMP_API_KEY = defineSecret("FMP_API_KEY");
 const FINNHUB_API_KEY = defineSecret("FINNHUB_API_KEY");
+const VAPID_PRIVATE_KEY = defineSecret("VAPID_PRIVATE_KEY");
+// Public counterpart is not secret — it's embedded in app.js and required by
+// pushManager.subscribe(). Keep these two in sync if ever regenerated.
+const VAPID_PUBLIC_KEY = "BNK0LglRw3lW_dj_p4D9bjVm-0_RjCoPE5brxdmWx5yQ2_TnC7OkigbL5G_kboXKdQLVyYkzF0cJyKRyDj9MvrA";
 const FMP_BASE = "https://financialmodelingprep.com/stable";
 const FINNHUB_BASE = "https://finnhub.io/api/v1";
 
@@ -139,6 +149,85 @@ function buildStatement(facts, items) {
     }
     return row;
   });
+}
+
+// ---------- Curated screener ----------
+// FMP's real screener endpoint turned out to be paid-only (402 on the live
+// key) despite looking free-tier in the docs, and Finnhub has no screener
+// endpoint at all (404). So this runs against a small hand-picked universe of
+// well-known, liquid US tickers instead — sector is assigned here rather than
+// trusted from an API (Finnhub's industry taxonomy is inconsistent), and
+// name/sector cost nothing to fetch since they're already known.
+const SCREENER_UNIVERSE = [
+  ["AAPL", "Apple", "Technology"], ["MSFT", "Microsoft", "Technology"], ["NVDA", "NVIDIA", "Technology"],
+  ["AVGO", "Broadcom", "Technology"], ["ORCL", "Oracle", "Technology"], ["CRM", "Salesforce", "Technology"],
+  ["ADBE", "Adobe", "Technology"], ["AMD", "Advanced Micro Devices", "Technology"],
+  ["UNH", "UnitedHealth Group", "Healthcare"], ["JNJ", "Johnson & Johnson", "Healthcare"], ["LLY", "Eli Lilly", "Healthcare"],
+  ["ABBV", "AbbVie", "Healthcare"], ["MRK", "Merck", "Healthcare"], ["PFE", "Pfizer", "Healthcare"],
+  ["TMO", "Thermo Fisher Scientific", "Healthcare"], ["ABT", "Abbott Laboratories", "Healthcare"],
+  ["JPM", "JPMorgan Chase", "Financials"], ["BAC", "Bank of America", "Financials"], ["WFC", "Wells Fargo", "Financials"],
+  ["GS", "Goldman Sachs", "Financials"], ["MS", "Morgan Stanley", "Financials"], ["V", "Visa", "Financials"],
+  ["MA", "Mastercard", "Financials"], ["AXP", "American Express", "Financials"],
+  ["AMZN", "Amazon", "Consumer Discretionary"], ["TSLA", "Tesla", "Consumer Discretionary"], ["HD", "Home Depot", "Consumer Discretionary"],
+  ["MCD", "McDonald's", "Consumer Discretionary"], ["NKE", "Nike", "Consumer Discretionary"], ["SBUX", "Starbucks", "Consumer Discretionary"],
+  ["LOW", "Lowe's", "Consumer Discretionary"], ["BKNG", "Booking Holdings", "Consumer Discretionary"],
+  ["WMT", "Walmart", "Consumer Staples"], ["PG", "Procter & Gamble", "Consumer Staples"], ["KO", "Coca-Cola", "Consumer Staples"],
+  ["PEP", "PepsiCo", "Consumer Staples"], ["COST", "Costco", "Consumer Staples"], ["PM", "Philip Morris International", "Consumer Staples"],
+  ["MDLZ", "Mondelez International", "Consumer Staples"], ["CL", "Colgate-Palmolive", "Consumer Staples"],
+  ["XOM", "Exxon Mobil", "Energy"], ["CVX", "Chevron", "Energy"], ["COP", "ConocoPhillips", "Energy"],
+  ["SLB", "Schlumberger", "Energy"], ["EOG", "EOG Resources", "Energy"], ["MPC", "Marathon Petroleum", "Energy"],
+  ["PSX", "Phillips 66", "Energy"], ["OXY", "Occidental Petroleum", "Energy"],
+  ["CAT", "Caterpillar", "Industrials"], ["BA", "Boeing", "Industrials"], ["HON", "Honeywell", "Industrials"],
+  ["UNP", "Union Pacific", "Industrials"], ["UPS", "United Parcel Service", "Industrials"], ["GE", "GE Aerospace", "Industrials"],
+  ["LMT", "Lockheed Martin", "Industrials"], ["RTX", "RTX Corporation", "Industrials"],
+  ["LIN", "Linde", "Materials"], ["SHW", "Sherwin-Williams", "Materials"], ["APD", "Air Products", "Materials"],
+  ["FCX", "Freeport-McMoRan", "Materials"], ["NEM", "Newmont", "Materials"], ["ECL", "Ecolab", "Materials"],
+  ["NUE", "Nucor", "Materials"], ["DOW", "Dow Inc", "Materials"],
+  ["NEE", "NextEra Energy", "Utilities"], ["DUK", "Duke Energy", "Utilities"], ["SO", "Southern Company", "Utilities"],
+  ["D", "Dominion Energy", "Utilities"], ["AEP", "American Electric Power", "Utilities"], ["EXC", "Exelon", "Utilities"],
+  ["SRE", "Sempra", "Utilities"], ["XEL", "Xcel Energy", "Utilities"],
+  ["PLD", "Prologis", "Real Estate"], ["AMT", "American Tower", "Real Estate"], ["EQIX", "Equinix", "Real Estate"],
+  ["CCI", "Crown Castle", "Real Estate"], ["PSA", "Public Storage", "Real Estate"], ["SPG", "Simon Property Group", "Real Estate"],
+  ["O", "Realty Income", "Real Estate"], ["WELL", "Welltower", "Real Estate"],
+  ["GOOGL", "Alphabet", "Communication Services"], ["META", "Meta Platforms", "Communication Services"], ["NFLX", "Netflix", "Communication Services"],
+  ["DIS", "Walt Disney", "Communication Services"], ["CMCSA", "Comcast", "Communication Services"], ["TMUS", "T-Mobile US", "Communication Services"],
+  ["VZ", "Verizon Communications", "Communication Services"], ["T", "AT&T", "Communication Services"],
+];
+const SCREENER_SECTORS = [...new Set(SCREENER_UNIVERSE.map((r) => r[2]))];
+
+const screenerCache = new Map(); // symbol -> { fetchedAt, quote, metrics }
+const SCREENER_TTL_MS = 20 * 60 * 1000;
+
+async function getScreenerRow(symbol, finnhubKey) {
+  const cached = screenerCache.get(symbol);
+  if (cached && Date.now() - cached.fetchedAt < SCREENER_TTL_MS) return cached;
+  const [quoteRes, metricsRes] = await Promise.allSettled([
+    fetch(`${FINNHUB_BASE}/quote?symbol=${symbol}&token=${finnhubKey}`).then((r) => (r.ok ? r.json() : null)),
+    fetch(`${FINNHUB_BASE}/stock/metric?symbol=${symbol}&metric=all&token=${finnhubKey}`).then((r) => (r.ok ? r.json() : null)),
+  ]);
+  const entry = {
+    fetchedAt: Date.now(),
+    quote: quoteRes.status === "fulfilled" ? quoteRes.value : null,
+    metrics: metricsRes.status === "fulfilled" && metricsRes.value ? metricsRes.value.metric : null,
+  };
+  screenerCache.set(symbol, entry);
+  return entry;
+}
+
+// Bounds concurrent Finnhub calls so an unfiltered screen (up to ~80 tickers,
+// 2 calls each when not already cached) can't burst past the free-tier rate
+// limit the way a plain Promise.all over everything would.
+async function mapWithConcurrency(items, limit, fn) {
+  const results = new Array(items.length);
+  let i = 0;
+  async function worker() {
+    while (i < items.length) {
+      const idx = i++;
+      results[idx] = await fn(items[idx], idx);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return results;
 }
 
 const ALLOWED_ORIGINS = new Set([
@@ -292,6 +381,51 @@ exports.api = onRequest({ secrets: [FMP_API_KEY, FINNHUB_API_KEY], cors: false }
       return;
     }
 
+    if (endpoint === "screener-meta") {
+      return res.status(200).json({ sectors: SCREENER_SECTORS });
+    }
+
+    if (endpoint === "screener") {
+      const sector = req.query.sector || null;
+      const candidates = sector ? SCREENER_UNIVERSE.filter((r) => r[2] === sector) : SCREENER_UNIVERSE;
+
+      const rows = await mapWithConcurrency(candidates, 10, async ([symbol, name, sec]) => {
+        const { quote, metrics } = await getScreenerRow(symbol, FINNHUB_API_KEY.value());
+        return {
+          symbol,
+          name,
+          sector: sec,
+          price: quote && typeof quote.c === "number" ? quote.c : null,
+          changePct: quote && typeof quote.dp === "number" ? quote.dp : null,
+          marketCap: metrics && typeof metrics.marketCapitalization === "number" ? metrics.marketCapitalization : null,
+          beta: metrics && typeof metrics.beta === "number" ? metrics.beta : null,
+          dividendYield: metrics && typeof metrics.dividendYieldIndicatedAnnual === "number" ? metrics.dividendYieldIndicatedAnnual : null,
+        };
+      });
+
+      const num = (v) => (v === undefined || v === "" ? null : parseFloat(v));
+      const mcapMin = num(req.query.mcapMin);
+      const mcapMax = num(req.query.mcapMax);
+      const priceMin = num(req.query.priceMin);
+      const priceMax = num(req.query.priceMax);
+      const betaMin = num(req.query.betaMin);
+      const betaMax = num(req.query.betaMax);
+      const divMin = num(req.query.divMin);
+
+      const filtered = rows.filter((r) => {
+        if (mcapMin != null && !(r.marketCap >= mcapMin)) return false;
+        if (mcapMax != null && !(r.marketCap <= mcapMax)) return false;
+        if (priceMin != null && !(r.price >= priceMin)) return false;
+        if (priceMax != null && !(r.price <= priceMax)) return false;
+        if (betaMin != null && !(r.beta >= betaMin)) return false;
+        if (betaMax != null && !(r.beta <= betaMax)) return false;
+        if (divMin != null && !(r.dividendYield >= divMin)) return false;
+        return true;
+      });
+
+      return res.status(200).json(filtered);
+    }
+
     if (endpoint === "search") {
       // Runs on Finnhub, not FMP — it has no daily cap (unlike FMP's 250/day,
       // which search used to share with every other call and could go down
@@ -335,3 +469,72 @@ exports.api = onRequest({ secrets: [FMP_API_KEY, FINNHUB_API_KEY], cors: false }
     res.status(502).json({ error: "upstream fetch failed" });
   }
 });
+
+// Price alerts: runs every 15 minutes, checks each saved threshold against a
+// live Finnhub quote, and pushes a notification the moment it's crossed —
+// then deletes that one alert (fire-once, matching the client's manual
+// remove-alert behaviour) so it doesn't re-notify on the next tick.
+exports.checkAlerts = onSchedule(
+  { schedule: "every 15 minutes", secrets: [FINNHUB_API_KEY, VAPID_PRIVATE_KEY] },
+  async () => {
+    const alertsSnap = await db.collection("alerts").doc("main").get();
+    const alerts = alertsSnap.exists ? alertsSnap.data() : {};
+    const tickers = Object.keys(alerts || {});
+    if (!tickers.length) return;
+
+    const subsSnap = await db.collection("pushSubscriptions").doc("main").get();
+    const subs = subsSnap.exists ? (subsSnap.data().subscriptions || []) : [];
+    if (!subs.length) return;
+
+    webpush.setVapidDetails("mailto:jakemawby23@gmail.com", VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY.value());
+
+    const firedTickers = [];
+    const deadEndpoints = [];
+
+    for (const ticker of tickers) {
+      const { direction, price: threshold } = alerts[ticker] || {};
+      if (!direction || typeof threshold !== "number") continue;
+
+      let quote;
+      try {
+        const res = await fetch(`${FINNHUB_BASE}/quote?symbol=${ticker}&token=${FINNHUB_API_KEY.value()}`);
+        if (!res.ok) continue;
+        quote = await res.json();
+      } catch {
+        continue;
+      }
+      const price = quote && quote.c;
+      if (typeof price !== "number" || !price) continue;
+
+      const crossed = direction === "above" ? price >= threshold : price <= threshold;
+      if (!crossed) continue;
+
+      firedTickers.push(ticker);
+      const payload = JSON.stringify({
+        title: `${ticker} ${direction === "above" ? "rose above" : "fell below"} $${threshold}`,
+        body: `Now trading at $${price.toFixed(2)}`,
+        url: `/?ticker=${ticker}`,
+      });
+
+      for (const sub of subs) {
+        try {
+          await webpush.sendNotification(sub, payload);
+        } catch (err) {
+          // 404/410 = the browser/device unsubscribed or expired; anything
+          // else is a transient delivery failure worth leaving alone.
+          if (err.statusCode === 404 || err.statusCode === 410) deadEndpoints.push(sub.endpoint);
+        }
+      }
+    }
+
+    if (firedTickers.length) {
+      const update = {};
+      for (const t of firedTickers) update[t] = admin.firestore.FieldValue.delete();
+      await db.collection("alerts").doc("main").set(update, { merge: true });
+    }
+    if (deadEndpoints.length) {
+      const stillGood = subs.filter((s) => !deadEndpoints.includes(s.endpoint));
+      await db.collection("pushSubscriptions").doc("main").set({ subscriptions: stillGood });
+    }
+  }
+);

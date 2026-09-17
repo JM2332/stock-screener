@@ -387,6 +387,36 @@ table.compare-table th:first-child, table.compare-table td:first-child { text-al
 table.compare-table thead th { color: var(--text-faint); font-weight: 500; font-size: 11.5px; border-bottom: 1px solid var(--card-border); }
 table.compare-table tbody tr:hover { background: var(--bg-elevated); }
 
+/* Screener */
+.screener-view { display: flex; flex-direction: column; gap: 18px; }
+.screener-filters { display: flex; flex-wrap: wrap; align-items: end; gap: 12px; margin-top: 12px; }
+.screener-filters label {
+  display: flex; flex-direction: column; gap: 5px;
+  font-size: 11.5px; color: var(--text-faint);
+}
+.screener-filters select, .screener-filters input {
+  background: var(--bg-elevated);
+  border: 1px solid var(--card-border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-size: 12.5px;
+  padding: 7px 10px;
+  width: 110px;
+}
+.screener-filters select { width: 160px; }
+table.screener-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+table.screener-table th, table.screener-table td { text-align: right; padding: 8px 10px; white-space: nowrap; }
+table.screener-table th:first-child, table.screener-table td:first-child,
+table.screener-table th:nth-child(2), table.screener-table td:nth-child(2) { text-align: left; }
+table.screener-table td:first-child { color: var(--text); font-weight: 600; }
+table.screener-table td:nth-child(2) { color: var(--text-dim); }
+table.screener-table thead th { color: var(--text-faint); font-weight: 500; font-size: 11.5px; border-bottom: 1px solid var(--card-border); }
+table.screener-table tbody tr { cursor: pointer; }
+table.screener-table tbody tr:hover { background: var(--bg-elevated); }
+table.screener-table .up { color: var(--green); }
+table.screener-table .down { color: var(--red); }
+.screener-table-wrap { overflow-x: auto; }
+
 /* Transcripts */
 .transcript-row {
   display: flex; align-items: center; justify-content: space-between;

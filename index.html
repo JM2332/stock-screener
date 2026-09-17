@@ -10,7 +10,7 @@
 <meta name="apple-mobile-web-app-capable" content="yes" />
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
 <meta name="apple-mobile-web-app-title" content="Screener" />
-<link rel="stylesheet" href="style.css?v=202609160002" />
+<link rel="stylesheet" href="style.css?v=202609170001" />
 <script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore-compat.js"></script>
 </head>
@@ -33,6 +33,7 @@
     <div id="watchlist-panel" class="watchlist-panel hidden"></div>
   </div>
   <button id="compare-toggle" class="watchlist-btn" title="Compare tickers side by side">⇄ Compare</button>
+  <button id="screener-toggle" class="watchlist-btn" title="Screen stocks by sector, market cap, and more">⚲ Screener</button>
   <div id="usage-pill" class="usage-pill" title="Financial Modeling Prep free tier resets daily">0 / 250 today</div>
 </header>
 
@@ -170,10 +171,38 @@
       <div id="compare-financials-body" class="card-body"></div>
     </section>
   </div>
+
+  <div id="screener-view" class="screener-view hidden">
+    <section class="card">
+      <h2>Screen the Curated Universe</h2>
+      <p class="muted-note">Filters run against a hand-picked list of ~80 well-known US tickers across every sector, pulled live from Finnhub (free — doesn't touch the daily FMP quota).</p>
+      <div class="screener-filters">
+        <label>Sector
+          <select id="screener-sector"><option value="">All sectors</option></select>
+        </label>
+        <label>Market cap min ($B)<input id="screener-mcap-min" type="number" min="0" step="1" /></label>
+        <label>Market cap max ($B)<input id="screener-mcap-max" type="number" min="0" step="1" /></label>
+        <label>Price min ($)<input id="screener-price-min" type="number" min="0" step="1" /></label>
+        <label>Price max ($)<input id="screener-price-max" type="number" min="0" step="1" /></label>
+        <label>Beta min<input id="screener-beta-min" type="number" step="0.1" /></label>
+        <label>Beta max<input id="screener-beta-max" type="number" step="0.1" /></label>
+        <label>Dividend yield min (%)<input id="screener-div-min" type="number" min="0" step="0.1" /></label>
+        <button id="screener-run" class="tab-btn active">Run Screen</button>
+        <button id="screener-reset" class="tab-btn">Reset</button>
+      </div>
+    </section>
+
+    <section class="card" id="screener-results-card">
+      <h2>Results</h2>
+      <div id="screener-results-body" class="card-body">
+        <div class="muted-note">Set your filters above and click Run Screen.</div>
+      </div>
+    </section>
+  </div>
 </main>
 
 <script src="https://s3.tradingview.com/tv.js"></script>
-<script src="app.js?v=202609160001"></script>
-<script>if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js?v=202608291200');</script>
+<script src="app.js?v=202609170001"></script>
+<script>if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js?v=202609160001');</script>
 </body>
 </html>

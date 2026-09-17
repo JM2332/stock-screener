@@ -13,7 +13,7 @@ let currentSearchItems = [];
 // the Watchlist section below reads it immediately at script-load time, and
 // a `let` declared later in the file wouldn't exist yet at that point.
 let currentSymbol = null;
-let currentView = "home"; // "home" | "stock" | "compare"
+let currentView = "home"; // "home" | "stock" | "compare" | "screener"
 
 async function api(path) {
   bumpUsage();
@@ -305,6 +305,7 @@ $("#home-btn").addEventListener("click", showHome);
 
 function showHome() {
   exitCompareMode();
+  exitScreenerMode();
   currentSymbol = null;
   stockView.classList.add("hidden");
   homeView.classList.remove("hidden");
@@ -427,14 +428,59 @@ async function loadHomeContent() {
     .join("");
 }
 
-// ---------- Price alerts ----------
-// Threshold storage only for now — actual notification delivery needs a
-// scheduled Cloud Function plus an email service (EmailJS, same pattern as
-// staff-rota's publish notifications), held off until that's set up since
-// connecting an email service is a step only the user can do. The threshold
-// itself already persists and syncs across devices via Firestore, same
-// pattern as the watchlist.
+// ---------- Web Push ----------
+// A scheduled Cloud Function (checkAlerts, every 15 min) checks saved
+// thresholds against live prices and delivers via the Push API — no email
+// service needed. VAPID_PUBLIC_KEY has no matching secret-ness requirement
+// (only the private key, held server-side, must stay secret) so it's safe
+// to embed here as-is; it must exactly match the private key set via
+// `firebase functions:secrets:set VAPID_PRIVATE_KEY`.
+const VAPID_PUBLIC_KEY = "BNK0LglRw3lW_dj_p4D9bjVm-0_RjCoPE5brxdmWx5yQ2_TnC7OkigbL5G_kboXKdQLVyYkzF0cJyKRyDj9MvrA";
+const pushSubsDoc = db.collection("pushSubscriptions").doc("main");
 
+function urlBase64ToUint8Array(base64String) {
+  const padding = "=".repeat((4 - (base64String.length % 4)) % 4);
+  const base64 = (base64String + padding).replace(/-/g, "+").replace(/_/g, "/");
+  const rawData = atob(base64);
+  return Uint8Array.from([...rawData].map((c) => c.charCodeAt(0)));
+}
+
+// Requests notification permission and registers a push subscription only
+// when the user actually saves their first alert — asking upfront/unprompted
+// gets auto-denied by most browsers and gives no context for why it's asked.
+async function ensurePushSubscription() {
+  if (!("serviceWorker" in navigator) || !("PushManager" in window)) return false;
+  if (Notification.permission === "denied") return false;
+  if (Notification.permission !== "granted") {
+    const perm = await Notification.requestPermission();
+    if (perm !== "granted") return false;
+  }
+  try {
+    const reg = await navigator.serviceWorker.ready;
+    let sub = await reg.pushManager.getSubscription();
+    if (!sub) {
+      sub = await reg.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: urlBase64ToUint8Array(VAPID_PUBLIC_KEY),
+      });
+    }
+    const raw = sub.toJSON();
+    const snap = await pushSubsDoc.get();
+    const existing = (snap.exists && snap.data().subscriptions) || [];
+    // Dedup by endpoint — each browser/device produces a distinct endpoint,
+    // so this naturally supports the user's alerts firing on every device
+    // they've opened the app on, without ever storing duplicates.
+    if (!existing.some((s) => s.endpoint === raw.endpoint)) {
+      await pushSubsDoc.set({ subscriptions: [...existing, raw] }, { merge: true });
+    }
+    return true;
+  } catch (err) {
+    console.error("Push subscribe failed:", err);
+    return false;
+  }
+}
+
+// ---------- Price alerts ----------
 const alertsDoc = db.collection("alerts").doc("main");
 let alerts = {};
 
@@ -462,6 +508,9 @@ $("#alert-save").addEventListener("click", () => {
   alerts = { ...alerts, [currentSymbol]: { direction, price } };
   showAlertFormState(currentSymbol);
   $("#alert-form").classList.add("hidden");
+  ensurePushSubscription().then((granted) => {
+    if (!granted) $("#alert-current").textContent += " (enable notifications in your browser to be alerted)";
+  });
 });
 
 $("#alert-remove").addEventListener("click", () => {
@@ -505,6 +554,7 @@ $("#compare-toggle").addEventListener("click", () => {
     exitCompareMode();
     if (!currentSymbol) showHome();
   } else {
+    exitScreenerMode();
     stockView.classList.add("hidden");
     homeView.classList.add("hidden");
     hideSearchResults();
@@ -763,10 +813,124 @@ function renderCompareFinancials() {
   el.innerHTML = `<div class="compare-table-wrap"><table class="compare-table"><thead>${header}</thead><tbody>${body}</tbody></table></div>`;
 }
 
+// ---------- Screener ----------
+// FMP's real screener endpoint turned out to be paid-only, and Finnhub has
+// none at all — so this filters a curated ~80-ticker universe (defined
+// server-side in the Cloud Function, cached there too) instead of hitting a
+// live "screen the whole market" API. Sector list mirrors SCREENER_UNIVERSE
+// in functions/index.js; kept as a plain client-side list since it barely
+// ever changes and it saves a round trip on every screener open.
+const SCREENER_SECTORS = [
+  "Technology", "Healthcare", "Financials", "Consumer Discretionary", "Consumer Staples",
+  "Energy", "Industrials", "Materials", "Utilities", "Real Estate", "Communication Services",
+];
+const screenerView = $("#screener-view");
+let screenerMode = false;
+
+$("#screener-sector").innerHTML += SCREENER_SECTORS.map((s) => `<option value="${s}">${s}</option>`).join("");
+
+$("#screener-toggle").addEventListener("click", () => {
+  if (screenerMode) {
+    exitScreenerMode();
+    if (!currentSymbol) showHome();
+  } else {
+    exitCompareMode();
+    stockView.classList.add("hidden");
+    homeView.classList.add("hidden");
+    hideSearchResults();
+    screenerMode = true;
+    currentView = "screener";
+    $("#screener-toggle").classList.add("active");
+    screenerView.classList.remove("hidden");
+  }
+});
+
+function exitScreenerMode() {
+  if (!screenerMode) return;
+  screenerMode = false;
+  $("#screener-toggle").classList.remove("active");
+  screenerView.classList.add("hidden");
+}
+
+$("#screener-run").addEventListener("click", runScreen);
+$("#screener-reset").addEventListener("click", () => {
+  ["screener-sector", "screener-mcap-min", "screener-mcap-max", "screener-price-min", "screener-price-max", "screener-beta-min", "screener-beta-max", "screener-div-min"]
+    .forEach((id) => ($(`#${id}`).value = ""));
+  $("#screener-results-body").innerHTML = `<div class="muted-note">Set your filters above and click Run Screen.</div>`;
+});
+
+async function runScreen() {
+  const body = $("#screener-results-body");
+  body.innerHTML = `<div class="spinner-line">Screening…</div>`;
+
+  const sector = $("#screener-sector").value;
+  const billionsToMillions = (id) => {
+    const v = parseFloat($(`#${id}`).value);
+    return Number.isFinite(v) ? v * 1000 : null;
+  };
+  const num = (id) => {
+    const v = parseFloat($(`#${id}`).value);
+    return Number.isFinite(v) ? v : null;
+  };
+  const params = new URLSearchParams();
+  if (sector) params.set("sector", sector);
+  const mcapMin = billionsToMillions("screener-mcap-min");
+  const mcapMax = billionsToMillions("screener-mcap-max");
+  const priceMin = num("screener-price-min");
+  const priceMax = num("screener-price-max");
+  const betaMin = num("screener-beta-min");
+  const betaMax = num("screener-beta-max");
+  const divMin = num("screener-div-min");
+  if (mcapMin != null) params.set("mcapMin", mcapMin);
+  if (mcapMax != null) params.set("mcapMax", mcapMax);
+  if (priceMin != null) params.set("priceMin", priceMin);
+  if (priceMax != null) params.set("priceMax", priceMax);
+  if (betaMin != null) params.set("betaMin", betaMin);
+  if (betaMax != null) params.set("betaMax", betaMax);
+  if (divMin != null) params.set("divMin", divMin);
+
+  let rows;
+  try {
+    rows = await freeApi(`screener?${params.toString()}`);
+  } catch (err) {
+    body.innerHTML = `<div class="muted-note">Screen failed — try again (${err.message}).</div>`;
+    return;
+  }
+  if (!Array.isArray(rows) || !rows.length) {
+    body.innerHTML = `<div class="muted-note">No matches in the curated universe for these filters.</div>`;
+    return;
+  }
+  rows.sort((a, b) => (b.marketCap || 0) - (a.marketCap || 0));
+
+  const header = `<tr><th>Symbol</th><th>Name</th><th>Sector</th><th>Price</th><th>Change</th><th>Market Cap</th><th>Beta</th><th>Div Yield</th></tr>`;
+  const rowsHtml = rows
+    .map((r) => {
+      const up = typeof r.changePct === "number" && r.changePct >= 0;
+      return `<tr data-symbol="${r.symbol}">
+        <td>${r.symbol}</td>
+        <td>${r.name}</td>
+        <td>${r.sector}</td>
+        <td>${typeof r.price === "number" ? "$" + fmtNum(r.price, { maximumFractionDigits: 2 }) : "—"}</td>
+        <td class="${typeof r.changePct === "number" ? (up ? "up" : "down") : ""}">${typeof r.changePct === "number" ? `${up ? "+" : ""}${fmtNum(r.changePct, { maximumFractionDigits: 2 })}%` : "—"}</td>
+        <td>${typeof r.marketCap === "number" ? fmtBig(r.marketCap * 1e6) : "—"}</td>
+        <td>${typeof r.beta === "number" ? fmtNum(r.beta, { maximumFractionDigits: 2 }) : "—"}</td>
+        <td>${typeof r.dividendYield === "number" ? fmtNum(r.dividendYield, { maximumFractionDigits: 2 }) + "%" : "—"}</td>
+      </tr>`;
+    })
+    .join("");
+
+  body.innerHTML = `<div class="muted-note">${rows.length} match${rows.length === 1 ? "" : "es"}</div>
+    <div class="screener-table-wrap"><table class="screener-table"><thead>${header}</thead><tbody>${rowsHtml}</tbody></table></div>`;
+  body.querySelectorAll("tbody tr").forEach((row) => {
+    row.addEventListener("click", () => selectTicker(row.dataset.symbol));
+  });
+}
+
 // ---------- Loading a ticker ----------
 
 function loadTicker(symbol) {
   exitCompareMode(); // selecting a single ticker implies leaving compare view
+  exitScreenerMode();
   homeView.classList.add("hidden");
   stockView.classList.remove("hidden");
   currentView = "stock";

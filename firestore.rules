@@ -11,5 +11,8 @@ service cloud.firestore {
     match /alerts/main {
       allow read, write: if true;
     }
+    match /pushSubscriptions/main {
+      allow read, write: if true;
+    }
   }
 }
