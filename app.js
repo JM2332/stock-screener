@@ -364,6 +364,9 @@ async function loadHomeContent() {
     pulseEl.classList.remove("hidden");
   }
 
+  const session = marketSession();
+  const sessionBadge = sessionBadgeHtml(session);
+
   tilesEl.innerHTML = results
     .map((r) => {
       const q = r.quote;
@@ -394,7 +397,7 @@ async function loadHomeContent() {
           </div>
         </div>
         <div class="home-tile-price">$${fmtNum(q.c, { maximumFractionDigits: 2 })}</div>
-        <div class="home-tile-change ${up ? "up" : "down"}">${up ? "+" : ""}${fmtNum(q.d, { maximumFractionDigits: 2 })} (${up ? "+" : ""}${fmtNum(q.dp, { maximumFractionDigits: 2 })}%)</div>
+        <div class="home-tile-change ${up ? "up" : "down"}">${up ? "+" : ""}${fmtNum(q.d, { maximumFractionDigits: 2 })} (${up ? "+" : ""}${fmtNum(q.dp, { maximumFractionDigits: 2 })}%) ${sessionBadge}</div>
         ${rangeHtml}
       </div>`;
     })
@@ -1016,6 +1019,38 @@ function normalizeExchange(raw) {
   return raw;
 }
 
+// Finnhub's /quote is documented as "real-time quote data for US stocks"
+// with no regular-hours-only caveat, and its "current price" (c) is a plain
+// last-trade price rather than something explicitly scoped to the regular
+// session — so outside 9:30am-4pm ET it should already reflect the latest
+// pre-market/after-hours trade, not a frozen previous close. This just adds
+// a label so that's clear rather than silently ambiguous; if it turns out
+// Finnhub's free tier doesn't actually update c outside regular hours, the
+// badge itself would be misleading and need revisiting.
+function marketSession() {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/New_York",
+    hour12: false,
+    weekday: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).formatToParts(new Date());
+  const get = (type) => parts.find((p) => p.type === type).value;
+  const weekday = get("weekday");
+  if (weekday === "Sat" || weekday === "Sun") return "closed";
+  const minutes = parseInt(get("hour"), 10) * 60 + parseInt(get("minute"), 10);
+  if (minutes >= 4 * 60 && minutes < 9 * 60 + 30) return "pre";
+  if (minutes >= 9 * 60 + 30 && minutes < 16 * 60) return "open";
+  if (minutes >= 16 * 60 && minutes < 20 * 60) return "after";
+  return "closed";
+}
+
+function sessionBadgeHtml(session) {
+  if (session === "pre") return `<span class="session-badge">Pre-market</span>`;
+  if (session === "after") return `<span class="session-badge">After hours</span>`;
+  return "";
+}
+
 // ---------- Hero ----------
 // Sourced entirely from Finnhub now — it covers effectively any US-listed
 // ticker for free, unlike FMP's curated whitelist, so the hero card (and
@@ -1047,7 +1082,7 @@ async function loadHero(symbol, fhQuotePromise, fhProfilePromise, fhMetricsPromi
     const changeEl = $("#s-change");
     const up = change >= 0;
     changeEl.className = "hero-change " + (up ? "up" : "down");
-    changeEl.textContent = `${up ? "+" : ""}${fmtNum(change, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} (${up ? "+" : ""}${fmtNum(changePct, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}%)`;
+    changeEl.innerHTML = `${up ? "+" : ""}${fmtNum(change, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} (${up ? "+" : ""}${fmtNum(changePct, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}%) ${sessionBadgeHtml(marketSession())}`;
 
     let fmpVolume = "—";
     try {
