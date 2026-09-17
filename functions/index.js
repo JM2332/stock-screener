@@ -41,6 +41,9 @@ const ENDPOINTS = {
 const sectorPeCache = new Map(); // exchange -> { fetchedAt, rows }
 const SECTOR_PE_TTL_MS = 60 * 60 * 1000;
 
+let marketNewsCache = null; // { fetchedAt, body } — same feed for every visitor
+const MARKET_NEWS_TTL_MS = 10 * 60 * 1000;
+
 // SEC EDGAR — free, unlimited (no key, just a descriptive User-Agent per
 // their fair-access policy), and the original source FMP/Finnhub both build
 // their own numbers from. Used for balance sheet/income/cash flow statements
@@ -338,6 +341,22 @@ exports.api = onRequest({ secrets: [FMP_API_KEY, FINNHUB_API_KEY], cors: false, 
       const upstream = await fetch(url);
       const body = await upstream.text();
       return res.status(upstream.status).set("Content-Type", "application/json").send(body);
+    }
+
+    if (endpoint === "market-news") {
+      // General financial/business news, not tied to any one ticker —
+      // Finnhub's free tier (confirmed live, not just from docs) under
+      // category=general. Same value for every visitor, so a short
+      // in-memory cache avoids re-hitting Finnhub on every home-page load.
+      const cached = marketNewsCache;
+      if (cached && Date.now() - cached.fetchedAt < MARKET_NEWS_TTL_MS) {
+        return res.status(200).json(cached.body);
+      }
+      const upstream = await fetch(`${FINNHUB_BASE}/news?category=general&token=${FINNHUB_API_KEY.value()}`);
+      if (!upstream.ok) return res.status(upstream.status).json({ error: "market news unavailable" });
+      const body = await upstream.json();
+      marketNewsCache = { fetchedAt: Date.now(), body };
+      return res.status(200).json(body);
     }
 
     // Finnhub-backed "core" data — quote/profile/basic ratios/recommendation

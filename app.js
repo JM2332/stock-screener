@@ -322,14 +322,18 @@ function renderHomeGreeting() {
 
 async function loadHomeContent() {
   renderHomeGreeting();
+  loadMarketNews(); // independent of the watchlist — loads even with none set
   const symbols = watchlist.slice();
   const tilesEl = $("#home-tiles");
   const newsEl = $("#home-news");
+  const tickersEl = $("#home-news-tickers");
   const pulseEl = $("#home-pulse");
   pulseEl.classList.add("hidden");
   if (!symbols.length) {
     tilesEl.innerHTML = `<div class="muted-note">Search a ticker and click the star to add it to your watchlist — it'll show up here.</div>`;
     newsEl.innerHTML = "";
+    tickersEl.innerHTML = "";
+    lastHomeNewsResults = [];
     return;
   }
   tilesEl.innerHTML = `<div class="spinner-line">Loading…</div>`;
@@ -406,29 +410,82 @@ async function loadHomeContent() {
     tile.addEventListener("click", () => selectTicker(tile.dataset.symbol));
   });
 
-  const allNews = results
-    .flatMap((r) => r.news.map((n) => ({ ...n, _symbol: r.symbol })))
+  lastHomeNewsResults = results;
+  if (activeNewsFilter !== "all" && !symbols.includes(activeNewsFilter)) activeNewsFilter = "all";
+  renderHomeNewsTickers(symbols);
+  renderFilteredNews();
+}
+
+// Reusable across the per-ticker feed and the general markets feed — the
+// ticker tag only renders when the article carries one (market news has
+// none, which is fine since the section heading already gives it context).
+function newsCardHtml(it) {
+  const date = it.datetime ? new Date(it.datetime * 1000).toLocaleDateString(undefined, { month: "short", day: "numeric" }) : "";
+  return `
+    <a class="home-news-card" href="${it.url}" target="_blank" rel="noopener noreferrer">
+      ${it.image ? `<img class="home-news-card-img" src="${it.image}" loading="lazy" onerror="this.remove()" onload="if(this.naturalHeight&lt;80||this.naturalWidth/this.naturalHeight&gt;2.5)this.remove()" />` : ""}
+      <div class="home-news-card-body">
+        ${it._symbol ? `<span class="home-news-card-tag">${it._symbol}</span>` : ""}
+        <div class="home-news-card-title">${it.headline || ""}</div>
+        <div class="home-news-card-meta">${it.source || ""} · ${date}</div>
+      </div>
+    </a>`;
+}
+
+// "All" (default) merges every watchlisted ticker's news into one sorted
+// feed, same as before this feature existed; clicking a specific ticker tile
+// narrows it to just that ticker's articles — all from data already fetched
+// in loadHomeContent, so switching tickers is instant, no extra request.
+let lastHomeNewsResults = [];
+let activeNewsFilter = "all";
+
+function renderHomeNewsTickers(symbols) {
+  const tickersEl = $("#home-news-tickers");
+  const chips = ["all", ...symbols];
+  tickersEl.innerHTML = chips
+    .map((s) => `<button class="home-news-ticker-btn ${s === activeNewsFilter ? "active" : ""}" data-symbol="${s}">${s === "all" ? "All" : s}</button>`)
+    .join("");
+  tickersEl.querySelectorAll(".home-news-ticker-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      activeNewsFilter = btn.dataset.symbol;
+      tickersEl.querySelectorAll(".home-news-ticker-btn").forEach((b) => b.classList.toggle("active", b === btn));
+      renderFilteredNews();
+    });
+  });
+}
+
+function renderFilteredNews() {
+  const newsEl = $("#home-news");
+  const items = (
+    activeNewsFilter === "all"
+      ? lastHomeNewsResults.flatMap((r) => r.news.map((n) => ({ ...n, _symbol: r.symbol })))
+      : (lastHomeNewsResults.find((r) => r.symbol === activeNewsFilter)?.news || []).map((n) => ({ ...n, _symbol: activeNewsFilter }))
+  )
     .sort((a, b) => (b.datetime || 0) - (a.datetime || 0))
     .slice(0, 12);
 
-  if (!allNews.length) {
-    newsEl.innerHTML = `<div class="muted-note">No recent news found for your watchlist.</div>`;
+  if (!items.length) {
+    newsEl.innerHTML = `<div class="muted-note">No recent news found${activeNewsFilter === "all" ? " for your watchlist" : ` for ${activeNewsFilter}`}.</div>`;
     return;
   }
-  newsEl.innerHTML = allNews
-    .map((it) => {
-      const date = it.datetime ? new Date(it.datetime * 1000).toLocaleDateString(undefined, { month: "short", day: "numeric" }) : "";
-      return `
-      <a class="home-news-card" href="${it.url}" target="_blank" rel="noopener noreferrer">
-        ${it.image ? `<img class="home-news-card-img" src="${it.image}" loading="lazy" onerror="this.remove()" onload="if(this.naturalHeight&lt;80||this.naturalWidth/this.naturalHeight&gt;2.5)this.remove()" />` : ""}
-        <div class="home-news-card-body">
-          <span class="home-news-card-tag">${it._symbol}</span>
-          <div class="home-news-card-title">${it.headline || ""}</div>
-          <div class="home-news-card-meta">${it.source || ""} · ${date}</div>
-        </div>
-      </a>`;
-    })
-    .join("");
+  newsEl.innerHTML = items.map(newsCardHtml).join("");
+}
+
+async function loadMarketNews() {
+  const el = $("#home-market-news");
+  el.innerHTML = `<div class="spinner-line">Loading…</div>`;
+  let items;
+  try {
+    items = await freeApi("market-news");
+  } catch {
+    el.innerHTML = `<div class="muted-note">Couldn't load market news right now.</div>`;
+    return;
+  }
+  if (!Array.isArray(items) || !items.length) {
+    el.innerHTML = `<div class="muted-note">No market news available right now.</div>`;
+    return;
+  }
+  el.innerHTML = items.slice(0, 12).map(newsCardHtml).join("");
 }
 
 // ---------- Web Push ----------
