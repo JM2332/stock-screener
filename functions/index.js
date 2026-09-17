@@ -198,9 +198,31 @@ const SCREENER_SECTORS = [...new Set(SCREENER_UNIVERSE.map((r) => r[2]))];
 const screenerCache = new Map(); // symbol -> { fetchedAt, quote, metrics }
 const SCREENER_TTL_MS = 20 * 60 * 1000;
 
+// Caps actual Finnhub call *rate* (not just in-flight concurrency) across a
+// rolling 60s window. An unfiltered screen fires up to 176 calls (88 tickers
+// x 2), and bounding concurrency alone doesn't stop that from blowing past
+// Finnhub's free-tier 60/min cap over a few seconds — which would 429 every
+// other feature in the app sharing the same key (home page, ticker pages,
+// checkAlerts) for the rest of that minute, not just the screener itself.
+// 50/min leaves some headroom for other concurrent app traffic.
+const SCREENER_RATE_LIMIT_PER_MIN = 50;
+const screenerRequestTimes = [];
+
+async function throttleScreenerRequests(count) {
+  for (;;) {
+    const cutoff = Date.now() - 60000;
+    while (screenerRequestTimes.length && screenerRequestTimes[0] < cutoff) screenerRequestTimes.shift();
+    if (screenerRequestTimes.length + count <= SCREENER_RATE_LIMIT_PER_MIN) break;
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+  const now = Date.now();
+  for (let i = 0; i < count; i++) screenerRequestTimes.push(now);
+}
+
 async function getScreenerRow(symbol, finnhubKey) {
   const cached = screenerCache.get(symbol);
   if (cached && Date.now() - cached.fetchedAt < SCREENER_TTL_MS) return cached;
+  await throttleScreenerRequests(2);
   const [quoteRes, metricsRes] = await Promise.allSettled([
     fetch(`${FINNHUB_BASE}/quote?symbol=${symbol}&token=${finnhubKey}`).then((r) => (r.ok ? r.json() : null)),
     fetch(`${FINNHUB_BASE}/stock/metric?symbol=${symbol}&metric=all&token=${finnhubKey}`).then((r) => (r.ok ? r.json() : null)),
@@ -214,9 +236,8 @@ async function getScreenerRow(symbol, finnhubKey) {
   return entry;
 }
 
-// Bounds concurrent Finnhub calls so an unfiltered screen (up to ~80 tickers,
-// 2 calls each when not already cached) can't burst past the free-tier rate
-// limit the way a plain Promise.all over everything would.
+// Bounds concurrent in-flight requests so workers arrive at the rate
+// throttle above gradually rather than all piling up on it at once.
 async function mapWithConcurrency(items, limit, fn) {
   const results = new Array(items.length);
   let i = 0;
